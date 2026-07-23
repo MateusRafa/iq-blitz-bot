@@ -92,6 +92,44 @@ class BotRunner:
         self._last_error: str | None = None
         self._pnl: deque[dict[str, Any]] = deque(maxlen=PNL_HISTORY_MAX)
         self._snap: dict[str, Any] = self._empty_snap()
+        self._duration_lock = threading.Lock()
+        env_dur = int(
+            os.environ.get("POCKET_INITIAL_DURATION", str(DEFAULT_DURATION))
+        )
+        self._duration_seconds = max(MIN_DURATION, env_dur)
+        self._fsm: PocketFSM | None = None
+
+    def get_duration_seconds(self) -> int:
+        with self._duration_lock:
+            return self._duration_seconds
+
+    def set_duration_seconds(self, seconds: int) -> dict[str, Any]:
+        """Define duracao da proxima 1a ordem (ciclo atual mantem o T)."""
+        try:
+            sec = int(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "detail": "Duracao invalida."}
+        if sec < MIN_DURATION:
+            return {
+                "ok": False,
+                "detail": f"Minimo {MIN_DURATION}s para a 1a ordem.",
+            }
+        with self._duration_lock:
+            self._duration_seconds = sec
+        with self._lock:
+            fsm = self._fsm
+            if fsm is not None:
+                try:
+                    fsm.set_initial_duration(sec)
+                except Exception:
+                    pass
+            self._snap["duration_seconds"] = sec
+        print(f"[web] 1a ordem = {sec}s", flush=True)
+        return {
+            "ok": True,
+            "detail": f"1a ordem = {sec}s (vale na proxima abertura de ciclo).",
+            "duration_seconds": sec,
+        }
 
     @staticmethod
     def _empty_snap() -> dict[str, Any]:
@@ -107,6 +145,7 @@ class BotRunner:
             "daily_pnl": 0.0,
             "mark_pnl": 0.0,
             "total_pnl": 0.0,
+            "duration_seconds": DEFAULT_DURATION,
             "message": "Stand-by",
             "updated_at": None,
         }
@@ -149,6 +188,7 @@ class BotRunner:
         with self._lock:
             self._running = False
             self._snap["running"] = False
+            self._fsm = None
             self._message = "Stand-by. Clique Iniciar na ferramenta Bot."
             self._snap["message"] = self._message
         return {"ok": True, "detail": "Bot em stand-by."}
@@ -159,6 +199,7 @@ class BotRunner:
             out["running"] = self._running
             out["message"] = self._message
             out["last_error"] = self._last_error
+            out["duration_seconds"] = self.get_duration_seconds()
             return out
 
     def pnl_series(self) -> list[dict[str, Any]]:
@@ -210,9 +251,7 @@ class BotRunner:
             min_payout = int(os.environ.get("POCKET_MIN_PAYOUT", "50"))
             use_limit = env_flag("POCKET_USE_LIMIT", "0")
             log_every = float(os.environ.get("POCKET_LOG_EVERY", "5.0"))
-            initial_dur = int(
-                os.environ.get("POCKET_INITIAL_DURATION", str(DEFAULT_DURATION))
-            )
+            initial_dur = self.get_duration_seconds()
             if initial_dur < MIN_DURATION:
                 raise ValueError(f"duration invalido: minimo {MIN_DURATION}s")
 
@@ -242,8 +281,11 @@ class BotRunner:
                     asset=asset, initial_duration=initial_dur
                 ),
             )
+            with self._lock:
+                self._fsm = fsm
             asset = fsm.ensure_asset()
-            self._message = f"Rodando | {asset}"
+            self._message = f"Rodando | {asset} | 1a={initial_dur}s"
+            self._update_snap(duration_seconds=initial_dur)
             print(
                 f"Estrategia ON | asset={asset} | 1a ordem={initial_dur}s\n",
                 flush=True,
@@ -251,7 +293,14 @@ class BotRunner:
 
             last_log = 0.0
             last_state = ""
+            last_dur = initial_dur
             while not self._stop.is_set():
+                dur_now = self.get_duration_seconds()
+                if dur_now != last_dur:
+                    fsm.set_initial_duration(dur_now)
+                    last_dur = dur_now
+                    print(f"[web] duracao 1a ordem atualizada = {dur_now}s", flush=True)
+
                 broker.wait_price_update(timeout=poll_timeout)
                 if self._stop.is_set():
                     break
@@ -287,6 +336,7 @@ class BotRunner:
                     daily_pnl=round(daily, 4),
                     mark_pnl=round(mark, 4),
                     total_pnl=round(total, 4),
+                    duration_seconds=dur_now,
                 )
 
                 now_mono = time.monotonic()
@@ -328,6 +378,7 @@ class BotRunner:
                     pass
             with self._lock:
                 self._running = False
+                self._fsm = None
                 self._message = (
                     "Stand-by. Clique Iniciar na ferramenta Bot."
                     if ended == "stand-by"
