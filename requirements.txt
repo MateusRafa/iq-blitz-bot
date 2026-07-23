@@ -1,0 +1,1 @@
+BinaryOptionsToolsV2>=0.2.12
