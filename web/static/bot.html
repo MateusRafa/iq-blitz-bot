@@ -48,11 +48,24 @@
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
             </div>
+            <div class="duration-row">
+              <label for="dur-value">Tempo da 1ª ordem</label>
+              <input id="dur-value" type="number" min="1" step="1" value="60" />
+              <select id="dur-unit" aria-label="Unidade">
+                <option value="s">segundos</option>
+                <option value="m" selected>minutos</option>
+              </select>
+              <button type="button" class="btn btn-apply" id="btn-duration">Aplicar</button>
+            </div>
+            <p class="message" id="dur-hint" style="margin-top:0.5rem">
+              Mínimo 5s. Se o bot já estiver rodando, vale na <strong>próxima</strong> 1ª ordem do ciclo.
+            </p>
             <div id="cmd-erro" class="erro" hidden></div>
             <div class="status-grid">
               <div class="status-item"><span class="label">Estado</span><span class="value" id="s-state">—</span></div>
               <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
               <div class="status-item"><span class="label">Preço</span><span class="value" id="s-price">—</span></div>
+              <div class="status-item"><span class="label">1ª ordem</span><span class="value" id="s-dur">—</span></div>
               <div class="status-item"><span class="label">Sa / Sb</span><span class="value" id="s-book">—</span></div>
               <div class="status-item"><span class="label">Nível</span><span class="value" id="s-level">—</span></div>
               <div class="status-item"><span class="label">Resto T</span><span class="value" id="s-resto">—</span></div>
@@ -83,12 +96,17 @@
         localStorage.setItem(TOKEN_KEY, v);
       }
 
-      async function api(path, method = "GET") {
+      async function api(path, method = "GET", body = null) {
         const token = getToken();
-        const res = await fetch(path, {
+        const opts = {
           method,
           headers: { "X-Control-Token": token },
-        });
+        };
+        if (body != null) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, opts);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           const detail = data.detail || res.statusText || "Erro";
@@ -172,6 +190,19 @@
         document.getElementById("s-resto").textContent =
           s.resto_s != null ? `${Number(s.resto_s).toFixed(0)}s` : "—";
 
+        const dur = s.duration_seconds;
+        if (dur != null) {
+          document.getElementById("s-dur").textContent = `${dur}s`;
+          // sincroniza campo se o usuario nao esta editando
+          const inp = document.getElementById("dur-value");
+          const unit = document.getElementById("dur-unit").value;
+          if (document.activeElement !== inp) {
+            inp.value = unit === "m" ? Math.round((dur / 60) * 100) / 100 : dur;
+          }
+        } else {
+          document.getElementById("s-dur").textContent = "—";
+        }
+
         const pnlEl = document.getElementById("s-pnl");
         pnlEl.textContent = fmtPnl(s.total_pnl);
         pnlEl.className = "value " + (s.total_pnl >= 0 ? "pos" : "neg");
@@ -241,6 +272,27 @@
         try {
           const r = await api("/api/bot/stop", "POST");
           if (!r.ok) throw new Error(r.detail || "Falha ao parar");
+          await refresh();
+        } catch (e) {
+          cmdErro.hidden = false;
+          cmdErro.textContent = e.message || String(e);
+        }
+      });
+
+      document.getElementById("btn-duration").addEventListener("click", async () => {
+        cmdErro.hidden = true;
+        const raw = Number(document.getElementById("dur-value").value);
+        const unit = document.getElementById("dur-unit").value;
+        if (!Number.isFinite(raw) || raw <= 0) {
+          cmdErro.hidden = false;
+          cmdErro.textContent = "Informe um tempo válido.";
+          return;
+        }
+        const body = unit === "m" ? { minutes: raw } : { seconds: Math.round(raw) };
+        try {
+          const r = await api("/api/bot/duration", "POST", body);
+          if (!r.ok) throw new Error(r.detail || "Falha ao aplicar duração");
+          document.getElementById("dur-hint").textContent = r.detail || "Duração aplicada.";
           await refresh();
         } catch (e) {
           cmdErro.hidden = false;

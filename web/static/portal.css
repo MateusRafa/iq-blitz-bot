@@ -298,6 +298,44 @@ body {
   background: rgba(153, 27, 27, 0.95);
 }
 
+.btn-apply {
+  background: rgba(8, 47, 73, 0.85);
+  color: #67e8f9;
+  border: 1px solid rgba(34, 211, 238, 0.45);
+}
+
+.btn-apply:hover:not(:disabled) {
+  background: rgba(6, 182, 212, 0.25);
+}
+
+.duration-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.35rem;
+}
+
+.duration-row label {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin-right: 0.25rem;
+}
+
+.duration-row input,
+.duration-row select {
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  font-family: inherit;
+}
+
+.duration-row input {
+  width: 6rem;
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
