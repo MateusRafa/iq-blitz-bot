@@ -9,13 +9,21 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-from bot.runner import runner
+from bot.runner import MIN_DURATION, runner
 
 STATIC = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="IQ Blitz Bot — Portal", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+class DurationBody(BaseModel):
+    """Duracao da 1a ordem: seconds OU minutes (um dos dois)."""
+
+    seconds: int | None = Field(default=None, ge=MIN_DURATION)
+    minutes: float | None = Field(default=None, gt=0)
 
 
 def _control_token() -> str:
@@ -53,6 +61,7 @@ def health() -> dict:
         "ok": True,
         "bot_running": runner.is_running(),
         "token_configured": bool(_control_token()),
+        "duration_seconds": runner.get_duration_seconds(),
     }
 
 
@@ -74,3 +83,19 @@ def bot_start(_: None = Depends(require_token)) -> dict:
 @app.post("/api/bot/stop")
 def bot_stop(_: None = Depends(require_token)) -> dict:
     return runner.stop()
+
+
+@app.post("/api/bot/duration")
+def bot_duration(
+    body: DurationBody, _: None = Depends(require_token)
+) -> dict:
+    if body.seconds is not None:
+        sec = int(body.seconds)
+    elif body.minutes is not None:
+        sec = int(round(float(body.minutes) * 60))
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Informe seconds ou minutes.",
+        )
+    return runner.set_duration_seconds(sec)
