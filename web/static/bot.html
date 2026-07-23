@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pocket Bot — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack portal-header-stack--with-back">
+              <a class="portal-back-icon" href="/" title="Voltar ao portal" aria-label="Voltar ao portal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </a>
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Pocket Bot — Ciclo âncora-T</h1>
+                <p class="portal-header-subtitle">Controle DEMO</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="portal-main portal-main--wide">
+        <div id="auth-box" class="panel">
+          <h2>Acesso</h2>
+          <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+            Informe o <code>CONTROL_TOKEN</code> configurado no Railway.
+          </p>
+          <div class="token-bar">
+            <input id="token-input" type="password" placeholder="CONTROL_TOKEN" autocomplete="off" />
+            <button type="button" class="btn" id="token-save">Salvar</button>
+          </div>
+          <div id="auth-erro" class="erro" hidden></div>
+        </div>
+
+        <div id="app-box" hidden>
+          <div class="panel">
+            <h2>
+              Controle
+              <span id="run-badge" class="badge badge-off">STAND-BY</span>
+            </h2>
+            <div class="controls">
+              <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
+              <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+            </div>
+            <div id="cmd-erro" class="erro" hidden></div>
+            <div class="status-grid">
+              <div class="status-item"><span class="label">Estado</span><span class="value" id="s-state">—</span></div>
+              <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
+              <div class="status-item"><span class="label">Preço</span><span class="value" id="s-price">—</span></div>
+              <div class="status-item"><span class="label">Sa / Sb</span><span class="value" id="s-book">—</span></div>
+              <div class="status-item"><span class="label">Nível</span><span class="value" id="s-level">—</span></div>
+              <div class="status-item"><span class="label">Resto T</span><span class="value" id="s-resto">—</span></div>
+              <div class="status-item"><span class="label">PnL total</span><span class="value" id="s-pnl">—</span></div>
+              <div class="status-item"><span class="label">Realizado</span><span class="value" id="s-daily">—</span></div>
+            </div>
+            <p class="message" id="s-msg"></p>
+          </div>
+
+          <div class="panel">
+            <h2>Evolução lucro / prejuízo</h2>
+            <div class="chart-wrap">
+              <canvas id="pnl-chart"></canvas>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const TOKEN_KEY = "iq_blitz_control_token";
+
+      function getToken() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
+
+      function setToken(v) {
+        localStorage.setItem(TOKEN_KEY, v);
+      }
+
+      async function api(path, method = "GET") {
+        const token = getToken();
+        const res = await fetch(path, {
+          method,
+          headers: { "X-Control-Token": token },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = data.detail || res.statusText || "Erro";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        return data;
+      }
+
+      const authBox = document.getElementById("auth-box");
+      const appBox = document.getElementById("app-box");
+      const authErro = document.getElementById("auth-erro");
+      const cmdErro = document.getElementById("cmd-erro");
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const runBadge = document.getElementById("run-badge");
+
+      let chart = null;
+
+      function ensureChart() {
+        if (chart) return chart;
+        const ctx = document.getElementById("pnl-chart");
+        chart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels: [],
+            datasets: [
+              {
+                label: "PnL total ($)",
+                data: [],
+                borderColor: "#22d3ee",
+                backgroundColor: "rgba(34, 211, 238, 0.12)",
+                fill: true,
+                tension: 0.25,
+                pointRadius: 0,
+                borderWidth: 2,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: "#94a3b8" } },
+            },
+            scales: {
+              x: {
+                ticks: { color: "#64748b", maxTicksLimit: 8 },
+                grid: { color: "rgba(51, 65, 85, 0.45)" },
+              },
+              y: {
+                ticks: { color: "#64748b" },
+                grid: { color: "rgba(51, 65, 85, 0.45)" },
+              },
+            },
+          },
+        });
+        return chart;
+      }
+
+      function fmtPnl(n) {
+        if (n == null || Number.isNaN(n)) return "—";
+        const s = (n >= 0 ? "+" : "") + Number(n).toFixed(2);
+        return s;
+      }
+
+      function paintStatus(s) {
+        const running = !!s.running;
+        runBadge.textContent = running ? "RODANDO" : "STAND-BY";
+        runBadge.className = "badge " + (running ? "badge-on" : "badge-off");
+        btnStart.disabled = running;
+        btnStop.disabled = !running;
+
+        document.getElementById("s-state").textContent = s.state || "—";
+        document.getElementById("s-asset").textContent = s.asset || "—";
+        document.getElementById("s-price").textContent =
+          s.price != null ? Number(s.price).toFixed(6) : "—";
+        document.getElementById("s-book").textContent =
+          s.asset != null ? `${Number(s.sa).toFixed(2)} / ${Number(s.sb).toFixed(2)}` : "—";
+        document.getElementById("s-level").textContent =
+          s.level != null ? String(s.level) : "—";
+        document.getElementById("s-resto").textContent =
+          s.resto_s != null ? `${Number(s.resto_s).toFixed(0)}s` : "—";
+
+        const pnlEl = document.getElementById("s-pnl");
+        pnlEl.textContent = fmtPnl(s.total_pnl);
+        pnlEl.className = "value " + (s.total_pnl >= 0 ? "pos" : "neg");
+
+        const dEl = document.getElementById("s-daily");
+        dEl.textContent = fmtPnl(s.daily_pnl);
+        dEl.className = "value " + (s.daily_pnl >= 0 ? "pos" : "neg");
+
+        document.getElementById("s-msg").textContent = s.message || "";
+      }
+
+      async function refreshPnl() {
+        const data = await api("/api/bot/pnl");
+        const points = data.points || [];
+        const c = ensureChart();
+        c.data.labels = points.map((p) => {
+          try {
+            return new Date(p.t).toLocaleTimeString();
+          } catch {
+            return p.t;
+          }
+        });
+        c.data.datasets[0].data = points.map((p) => p.total);
+        c.update("none");
+      }
+
+      async function refresh() {
+        const s = await api("/api/bot/status");
+        paintStatus(s);
+        await refreshPnl();
+      }
+
+      async function unlock() {
+        authErro.hidden = true;
+        try {
+          await refresh();
+          authBox.hidden = true;
+          appBox.hidden = false;
+          setInterval(() => {
+            refresh().catch(() => {});
+          }, 2000);
+        } catch (e) {
+          authErro.hidden = false;
+          authErro.textContent = e.message || String(e);
+        }
+      }
+
+      document.getElementById("token-save").addEventListener("click", () => {
+        setToken(document.getElementById("token-input").value.trim());
+        unlock();
+      });
+
+      btnStart.addEventListener("click", async () => {
+        cmdErro.hidden = true;
+        try {
+          const r = await api("/api/bot/start", "POST");
+          if (!r.ok) throw new Error(r.detail || "Falha ao iniciar");
+          await refresh();
+        } catch (e) {
+          cmdErro.hidden = false;
+          cmdErro.textContent = e.message || String(e);
+        }
+      });
+
+      btnStop.addEventListener("click", async () => {
+        cmdErro.hidden = true;
+        try {
+          const r = await api("/api/bot/stop", "POST");
+          if (!r.ok) throw new Error(r.detail || "Falha ao parar");
+          await refresh();
+        } catch (e) {
+          cmdErro.hidden = false;
+          cmdErro.textContent = e.message || String(e);
+        }
+      });
+
+      if (getToken()) {
+        document.getElementById("token-input").value = getToken();
+        unlock();
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,402 @@
+/* Portal IQ Blitz — tema navy + ciano (ref. Pesquisa de Probabilidade) */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: #050b14;
+  color: #e2e8f0;
+}
+
+.portal-root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: #e2e8f0;
+  background-color: #050b14;
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.045) 1px, transparent 1px),
+    radial-gradient(ellipse 100% 70% at 50% -5%, rgba(6, 182, 212, 0.2), transparent 58%),
+    radial-gradient(circle at 85% 90%, rgba(34, 211, 238, 0.1), transparent 45%),
+    radial-gradient(circle at 15% 40%, rgba(14, 116, 144, 0.18), transparent 50%);
+  background-size: 32px 32px, 32px 32px, auto, auto, auto;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.portal-root::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 55% 40% at 50% 45%,
+    rgba(34, 211, 238, 0.06),
+    transparent 72%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+.portal-header {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  background: linear-gradient(175deg, #0f172a 0%, #0c1322 58%, #080f1a 100%);
+  color: #f8fafc;
+  padding: 1.125rem clamp(1.25rem, 4vw, 2.75rem);
+  border-bottom: 1px solid rgba(34, 211, 238, 0.35);
+  box-shadow: 0 0 40px rgba(6, 182, 212, 0.12), 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.portal-header-inner {
+  width: 100%;
+}
+
+.portal-header-bar {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.portal-header-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.portal-header-stack--with-back {
+  flex-direction: row;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 0.75rem;
+}
+
+.portal-header-title {
+  font-size: clamp(1.125rem, 2.8vw, 1.55rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.portal-header-subtitle {
+  margin-top: 0.35rem;
+  font-size: clamp(0.95rem, 1.9vw, 1.125rem);
+  font-weight: 500;
+  color: #bae6fd;
+  opacity: 0.95;
+}
+
+.portal-back-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8fafc;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.portal-back-icon:hover {
+  background: rgba(34, 211, 238, 0.12);
+  border-color: rgba(34, 211, 238, 0.35);
+}
+
+.portal-main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  padding: clamp(2rem, 5vw, 3.5rem) clamp(1.25rem, 4vw, 2.75rem)
+    clamp(3rem, 6vw, 4rem);
+}
+
+.portal-main--wide {
+  max-width: 1200px;
+}
+
+.portal-hero {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.portal-welcome-title {
+  font-size: clamp(1.65rem, 4.2vw, 2.15rem);
+  font-weight: 700;
+  color: #f8fafc;
+  text-shadow: 0 0 32px rgba(34, 211, 238, 0.25);
+  letter-spacing: -0.03em;
+}
+
+.portal-welcome-hint {
+  margin-top: 0.65rem;
+  font-size: clamp(0.98rem, 2vw, 1.1rem);
+  color: #94a3b8;
+}
+
+.portal-section-title {
+  text-align: center;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #67e8f9;
+  margin-bottom: 1.5rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.portal-section-title span {
+  padding-bottom: 0.35rem;
+  border-bottom: 3px solid rgba(34, 211, 238, 0.65);
+}
+
+.portal-cards {
+  list-style: none;
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.portal-cards-multi {
+  max-width: 980px;
+}
+
+.portal-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+  text-align: left;
+  padding: 1.5rem 1.35rem;
+  background: linear-gradient(
+    155deg,
+    rgba(15, 23, 42, 0.92) 0%,
+    rgba(15, 23, 42, 0.72) 100%
+  );
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 1rem;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  text-decoration: none;
+  box-shadow:
+    0 0 0 1px rgba(6, 182, 212, 0.08),
+    0 4px 22px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(103, 232, 249, 0.12);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.portal-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(103, 232, 249, 0.55);
+  box-shadow:
+    0 0 36px rgba(34, 211, 238, 0.2),
+    0 14px 40px rgba(0, 0, 0, 0.5);
+}
+
+.portal-card-icon {
+  font-size: 2.25rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.45));
+}
+
+.portal-card-heading {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #f0f9ff;
+}
+
+.portal-card-desc {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: #94a3b8;
+}
+
+.panel {
+  background: linear-gradient(
+    155deg,
+    rgba(15, 23, 42, 0.92) 0%,
+    rgba(15, 23, 42, 0.72) 100%
+  );
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 1rem;
+  padding: 1.25rem 1.35rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 4px 22px rgba(0, 0, 0, 0.4);
+}
+
+.panel h2 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #67e8f9;
+  margin-bottom: 1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.btn {
+  padding: 0.7rem 1.25rem;
+  border: none;
+  border-radius: 0.55rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-start {
+  background: #0891b2;
+  color: #ecfeff;
+}
+
+.btn-start:hover:not(:disabled) {
+  background: #06b6d4;
+}
+
+.btn-stop {
+  background: rgba(127, 29, 29, 0.85);
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+}
+
+.btn-stop:hover:not(:disabled) {
+  background: rgba(153, 27, 27, 0.95);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.status-item {
+  background: rgba(8, 47, 73, 0.35);
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 0.65rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.status-item .label {
+  display: block;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin-bottom: 0.25rem;
+}
+
+.status-item .value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #f0f9ff;
+}
+
+.value.pos {
+  color: #4ade80;
+}
+
+.value.neg {
+  color: #f87171;
+}
+
+.message {
+  margin-top: 0.85rem;
+  font-size: 0.9rem;
+  color: #cbd5e1;
+}
+
+.erro {
+  background: rgba(127, 29, 29, 0.45);
+  color: #fca5a5;
+  padding: 0.75rem 1rem;
+  border-radius: 0.55rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.chart-wrap {
+  position: relative;
+  height: min(360px, 50vh);
+  width: 100%;
+}
+
+.token-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.token-bar input {
+  flex: 1;
+  min-width: 180px;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  font-family: inherit;
+}
+
+.token-bar .btn {
+  background: rgba(8, 47, 73, 0.7);
+  color: #67e8f9;
+  border: 1px solid rgba(34, 211, 238, 0.4);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.badge-on {
+  background: rgba(22, 163, 74, 0.25);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+
+.badge-off {
+  background: rgba(71, 85, 105, 0.4);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}

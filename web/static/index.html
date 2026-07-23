@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Portal — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack">
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Portal de ferramentas</h1>
+                <p class="portal-header-subtitle">IQ Blitz</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="portal-main">
+        <div class="portal-hero">
+          <p class="portal-welcome-title">Bem-vindo!</p>
+          <p class="portal-welcome-hint">
+            Selecione uma ferramenta abaixo para começar
+          </p>
+        </div>
+
+        <h2 class="portal-section-title"><span>Ferramentas disponíveis</span></h2>
+
+        <!-- Adicionar novos cards aqui no futuro -->
+        <ul class="portal-cards portal-cards-multi" id="tools" role="list"></ul>
+      </main>
+    </div>
+
+    <script>
+      /** Lista de ferramentas do portal — acrescente itens depois. */
+      const TOOLS = [
+        {
+          href: "/bot",
+          icon: "⚡",
+          heading: "Pocket Bot — Ciclo âncora-T",
+          desc:
+            "Controle DEMO: iniciar/parar o bot e acompanhar lucro/prejuízo em tempo real.",
+        },
+      ];
+
+      const list = document.getElementById("tools");
+      for (const t of TOOLS) {
+        const li = document.createElement("li");
+        li.innerHTML = `
+          <a class="portal-card" href="${t.href}">
+            <span class="portal-card-icon" aria-hidden="true">${t.icon}</span>
+            <span class="portal-card-heading">${t.heading}</span>
+            <span class="portal-card-desc">${t.desc}</span>
+          </a>`;
+        list.appendChild(li);
+      }
+    </script>
+  </body>
+</html>
