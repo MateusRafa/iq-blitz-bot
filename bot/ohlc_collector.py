@@ -1,6 +1,6 @@
 """Coletor OHLC Pocket → Supabase (ferramenta separada do bot).
 
-Ativo fixo (escolhido na UI). Seis timeframes numa unica tabela.
+Ativo fixo (escolhido na UI). Apenas timeframe 1h.
 """
 
 from __future__ import annotations
@@ -16,34 +16,19 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 from bot.ohlc_store import supabase_ok, upsert_candles
 from bot.runner import is_connection_error, load_ssid, normalize_asset
 
-# label UI → segundos da vela
+# label UI → segundos da vela (somente 1h)
 TIMEFRAMES: dict[str, int] = {
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
     "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
 }
 
 # Quanto historico pedir no backfill inicial (segundos de offset).
 BACKFILL_OFFSET: dict[str, int] = {
-    "5m": 3 * 86400,
-    "15m": 7 * 86400,
-    "30m": 14 * 86400,
-    "1h": 30 * 86400,
-    "4h": 90 * 86400,
-    "1d": 365 * 86400,
+    "1h": 30 * 86400,  # ~30 dias
 }
 
 # No loop ao vivo: so as velas recentes (offset em segundos).
 LIVE_OFFSET: dict[str, int] = {
-    "5m": 300 * 24,  # ~24 velas
-    "15m": 900 * 16,
-    "30m": 1800 * 12,
-    "1h": 3600 * 12,
-    "4h": 14400 * 8,
-    "1d": 86400 * 5,
+    "1h": 3600 * 12,  # ~12 velas
 }
 
 
