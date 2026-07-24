@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coletor OHLC — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack portal-header-stack--with-back">
+              <a class="portal-back-icon" href="/" title="Voltar ao portal" aria-label="Voltar ao portal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </a>
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Coletor OHLC</h1>
+                <p class="portal-header-subtitle">Pocket → Supabase (ativo fixo)</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="portal-main portal-main--wide">
+        <div id="auth-box" class="panel">
+          <h2>Acesso</h2>
+          <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+            Informe o <code>CONTROL_TOKEN</code> configurado no Railway.
+          </p>
+          <div class="token-bar">
+            <input id="token-input" type="password" placeholder="CONTROL_TOKEN" autocomplete="off" />
+            <button type="button" class="btn" id="token-save">Salvar</button>
+          </div>
+          <div id="auth-erro" class="erro" hidden></div>
+        </div>
+
+        <div id="app-box" hidden>
+          <div class="panel">
+            <h2>
+              Controle
+              <span id="run-badge" class="badge badge-off">STAND-BY</span>
+            </h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Ativo <strong>fixo</strong> (não segue o bot). Grava 6 timeframes
+              na tabela <code>ohlc_candles</code>: 5m, 15m, 30m, 1h, 4h, 1d.
+            </p>
+            <div class="duration-row">
+              <label for="asset-input">Ativo</label>
+              <input id="asset-input" type="text" placeholder="EURUSD_otc" style="min-width:10rem;flex:1" />
+              <button type="button" class="btn btn-apply" id="btn-asset">Aplicar</button>
+            </div>
+            <div class="controls" style="margin-top:0.85rem">
+              <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
+              <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+            </div>
+            <div id="cmd-erro" class="erro" hidden></div>
+            <div class="status-grid">
+              <div class="status-item"><span class="label">Fase</span><span class="value" id="s-phase">—</span></div>
+              <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
+              <div class="status-item"><span class="label">Supabase</span><span class="value" id="s-sb">—</span></div>
+              <div class="status-item"><span class="label">Último upsert</span><span class="value" id="s-last">—</span></div>
+              <div class="status-item"><span class="label">Total na sessão</span><span class="value" id="s-total">—</span></div>
+              <div class="status-item"><span class="label">Atualizado</span><span class="value" id="s-upd">—</span></div>
+            </div>
+            <p class="message" id="s-msg"></p>
+          </div>
+
+          <div class="panel">
+            <h2>Por timeframe</h2>
+            <div class="status-grid" id="tf-grid"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const TOKEN_KEY = "iq_blitz_control_token";
+      const TFS = ["5m", "15m", "30m", "1h", "4h", "1d"];
+
+      function getToken() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
+
+      function setToken(v) {
+        localStorage.setItem(TOKEN_KEY, v);
+      }
+
+      async function api(path, method = "GET", body = null) {
+        const token = getToken();
+        const opts = {
+          method,
+          headers: { "X-Control-Token": token },
+        };
+        if (body != null) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = data.detail || res.statusText || "Erro";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        return data;
+      }
+
+      const authBox = document.getElementById("auth-box");
+      const appBox = document.getElementById("app-box");
+      const authErro = document.getElementById("auth-erro");
+      const cmdErro = document.getElementById("cmd-erro");
+      const badge = document.getElementById("run-badge");
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const assetInput = document.getElementById("asset-input");
+      const tfGrid = document.getElementById("tf-grid");
+
+      for (const tf of TFS) {
+        const div = document.createElement("div");
+        div.className = "status-item";
+        div.innerHTML = `<span class="label">${tf}</span><span class="value" id="tf-${tf}">—</span>`;
+        tfGrid.appendChild(div);
+      }
+
+      function showAuth(err) {
+        authBox.hidden = false;
+        appBox.hidden = true;
+        if (err) {
+          authErro.hidden = false;
+          authErro.textContent = err;
+        } else {
+          authErro.hidden = true;
+        }
+      }
+
+      function showApp() {
+        authBox.hidden = true;
+        appBox.hidden = false;
+        authErro.hidden = true;
+      }
+
+      function setCmdErro(msg) {
+        if (!msg) {
+          cmdErro.hidden = true;
+          cmdErro.textContent = "";
+          return;
+        }
+        cmdErro.hidden = false;
+        cmdErro.textContent = msg;
+      }
+
+      function render(st) {
+        const running = !!st.running;
+        badge.textContent = running ? "COLETANDO" : "STAND-BY";
+        badge.className = "badge " + (running ? "badge-on" : "badge-off");
+        btnStart.disabled = running;
+        btnStop.disabled = !running;
+        assetInput.disabled = running;
+        if (!running && st.asset && document.activeElement !== assetInput) {
+          assetInput.value = st.asset;
+        }
+        document.getElementById("s-phase").textContent = st.phase || "—";
+        document.getElementById("s-asset").textContent = st.asset || "—";
+        document.getElementById("s-sb").textContent = st.supabase_ok
+          ? "ok"
+          : (st.supabase_msg || "não configurado");
+        document.getElementById("s-last").textContent =
+          st.last_upsert != null ? String(st.last_upsert) : "—";
+        document.getElementById("s-total").textContent =
+          st.total_upserted != null ? String(st.total_upserted) : "—";
+        document.getElementById("s-upd").textContent = st.updated_at
+          ? String(st.updated_at).replace("T", " ").slice(0, 19)
+          : "—";
+        document.getElementById("s-msg").textContent = st.message || st.error || "";
+        const per = st.per_tf || {};
+        for (const tf of TFS) {
+          const el = document.getElementById("tf-" + tf);
+          if (!el) continue;
+          const row = per[tf] || {};
+          if (row.err) {
+            el.textContent = "erro: " + row.err;
+          } else {
+            el.textContent = (row.ok != null ? row.ok : 0) + " upserts";
+          }
+        }
+      }
+
+      async function refresh() {
+        const st = await api("/api/ohlc/status");
+        render(st);
+      }
+
+      document.getElementById("token-save").addEventListener("click", async () => {
+        setToken(document.getElementById("token-input").value.trim());
+        try {
+          await refresh();
+          showApp();
+          setCmdErro("");
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-asset").addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc/asset", "POST", {
+            asset: assetInput.value.trim(),
+          });
+          render(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStart.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc/start", "POST", {
+            asset: assetInput.value.trim() || undefined,
+          });
+          render(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStop.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc/stop", "POST");
+          render(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      (async () => {
+        const t = getToken();
+        if (t) document.getElementById("token-input").value = t;
+        if (!t) {
+          showAuth();
+          return;
+        }
+        try {
+          await refresh();
+          showApp();
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      })();
+
+      setInterval(() => {
+        if (appBox.hidden) return;
+        refresh().catch(() => {});
+      }, 2500);
+    </script>
+  </body>
+</html>
