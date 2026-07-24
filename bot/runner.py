@@ -35,6 +35,32 @@ def normalize_asset(asset: str) -> str:
     return a
 
 
+def is_connection_error(exc: BaseException) -> bool:
+    """True se a falha indica WS/sessao Pocket caída (vale reconectar)."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    blob = f"{name} {msg}"
+    needles = (
+        "half closed",
+        "channel sender",
+        "pocketoptionerror",
+        "core error",
+        "websocket",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "timed out",
+        "timeout",
+        "not connected",
+        "disconnected",
+        "send to a half",
+        "os error 10054",
+        "os error 10053",
+        "feed parado",
+    )
+    return any(n in blob for n in needles)
+
+
 def load_ssid() -> str:
     ssid = os.environ.get("POCKET_OPTION_SSID", "").strip()
     if not ssid:
@@ -223,6 +249,39 @@ class BotRunner:
         with self._lock:
             return list(self._pnl)
 
+    def _reconnect_broker(
+        self,
+        broker: PocketBroker,
+        *,
+        asset: str,
+        max_attempts: int,
+    ) -> bool:
+        """Tenta reabrir WS com backoff. True se feed voltou."""
+        self._message = "Reconectando Pocket..."
+        self._update_snap(message=self._message)
+        for attempt in range(1, max(1, max_attempts) + 1):
+            if self._stop.is_set():
+                return False
+            wait = min(60.0, float(2 ** min(attempt, 5)))
+            print(
+                f"  !! reconnect tentativa {attempt}/{max_attempts} "
+                f"(espera {wait:.0f}s)...",
+                flush=True,
+            )
+            time.sleep(wait)
+            if self._stop.is_set():
+                return False
+            try:
+                px = broker.reconnect(asset=asset, feed_wait_seconds=15.0)
+            except Exception as exc:
+                print(f"  !! reconnect falhou: {exc}", flush=True)
+                continue
+            if px is not None:
+                with self._lock:
+                    self._last_error = None
+                return True
+        return False
+
     def _record_pnl(
         self,
         *,
@@ -313,6 +372,8 @@ class BotRunner:
             last_log = 0.0
             last_state = ""
             last_dur = initial_dur
+            feed_stale_s = float(os.environ.get("POCKET_FEED_STALE_SECONDS", "45"))
+            reconnect_max = int(os.environ.get("POCKET_RECONNECT_MAX", "30"))
             while not self._stop.is_set():
                 dur_now = self.get_duration_seconds()
                 if dur_now != last_dur:
@@ -320,78 +381,112 @@ class BotRunner:
                     last_dur = dur_now
                     print(f"[web] duracao 1a ordem atualizada = {dur_now}s", flush=True)
 
-                broker.wait_price_update(timeout=poll_timeout)
-                if self._stop.is_set():
-                    break
-                now = datetime.now().astimezone()
-                asset = fsm.config.asset
                 try:
-                    price = broker.get_price(asset)
-                except Exception as exc:
-                    print(f"preco indisponivel: {exc}", flush=True)
-                    time.sleep(0.2)
-                    continue
+                    if broker.feed_age_seconds() > feed_stale_s:
+                        raise RuntimeError(
+                            f"Feed parado ha {broker.feed_age_seconds():.0f}s "
+                            f"(limite {feed_stale_s:.0f}s)"
+                        )
 
-                state = fsm.tick(now)
-                asset = fsm.config.asset
-                daily = float(risk.daily_pnl)
-                mark = float(fsm.cycle.projected_mark_pnl(price))
-                total = daily + mark
-                resto = None
-                anchor = fsm.cycle.anchor_expires_at
-                if anchor is not None:
-                    resto = max(0.0, (anchor - now).total_seconds())
+                    broker.wait_price_update(timeout=poll_timeout)
+                    if self._stop.is_set():
+                        break
+                    now = datetime.now().astimezone()
+                    asset = fsm.config.asset
+                    try:
+                        price = broker.get_price(asset)
+                    except Exception as exc:
+                        if is_connection_error(exc):
+                            raise
+                        print(f"preco indisponivel: {exc}", flush=True)
+                        time.sleep(0.2)
+                        continue
 
-                wins = int(risk.wins)
-                losses = int(risk.losses)
-                settled = wins + losses
-                win_rate = (
-                    round(100.0 * wins / settled, 1) if settled > 0 else None
-                )
+                    state = fsm.tick(now)
+                    asset = fsm.config.asset
+                    daily = float(risk.daily_pnl)
+                    mark = float(fsm.cycle.projected_mark_pnl(price))
+                    total = daily + mark
+                    resto = None
+                    anchor = fsm.cycle.anchor_expires_at
+                    if anchor is not None:
+                        resto = max(0.0, (anchor - now).total_seconds())
 
-                self._record_pnl(daily=daily, mark=mark, total=total)
-                self._update_snap(
-                    running=True,
-                    asset=asset,
-                    price=price,
-                    state=state.value,
-                    sa=round(fsm.cycle.stake_above(), 2),
-                    sb=round(fsm.cycle.stake_below(), 2),
-                    level=fsm.cycle.level,
-                    resto_s=None if resto is None else round(resto, 1),
-                    daily_pnl=round(daily, 4),
-                    mark_pnl=round(mark, 4),
-                    total_pnl=round(total, 4),
-                    duration_seconds=dur_now,
-                    wins=wins,
-                    losses=losses,
-                    settled=settled,
-                    win_rate_pct=win_rate,
-                )
-
-                now_mono = time.monotonic()
-                if state.value != last_state or (now_mono - last_log) >= log_every:
-                    open_pos = [
-                        f"{p.direction}:{p.stake}@{p.entry_price}"
-                        for p in fsm.cycle.open_positions
-                    ]
-                    rem = "" if resto is None else f" resto={resto:.0f}s"
-                    print(
-                        f"{now.strftime('%H:%M:%S.%f')[:-3]} [{asset}] "
-                        f"price={price} state={state.value}{rem} "
-                        f"Sa={fsm.cycle.stake_above():.2f} "
-                        f"Sb={fsm.cycle.stake_below():.2f} "
-                        f"levels={fsm.cycle.level} open={open_pos} "
-                        f"pnl={total:+.2f}",
-                        flush=True,
+                    wins = int(risk.wins)
+                    losses = int(risk.losses)
+                    settled = wins + losses
+                    win_rate = (
+                        round(100.0 * wins / settled, 1) if settled > 0 else None
                     )
-                    last_log = now_mono
-                    last_state = state.value
 
-                if state.value == "STOP":
-                    ended = f"STOP: {fsm.stop_reason}"
-                    print(ended, flush=True)
-                    break
+                    self._record_pnl(daily=daily, mark=mark, total=total)
+                    self._update_snap(
+                        running=True,
+                        asset=asset,
+                        price=price,
+                        state=state.value,
+                        sa=round(fsm.cycle.stake_above(), 2),
+                        sb=round(fsm.cycle.stake_below(), 2),
+                        level=fsm.cycle.level,
+                        resto_s=None if resto is None else round(resto, 1),
+                        daily_pnl=round(daily, 4),
+                        mark_pnl=round(mark, 4),
+                        total_pnl=round(total, 4),
+                        duration_seconds=dur_now,
+                        wins=wins,
+                        losses=losses,
+                        settled=settled,
+                        win_rate_pct=win_rate,
+                    )
+
+                    now_mono = time.monotonic()
+                    if state.value != last_state or (now_mono - last_log) >= log_every:
+                        open_pos = [
+                            f"{p.direction}:{p.stake}@{p.entry_price}"
+                            for p in fsm.cycle.open_positions
+                        ]
+                        rem = "" if resto is None else f" resto={resto:.0f}s"
+                        print(
+                            f"{now.strftime('%H:%M:%S.%f')[:-3]} [{asset}] "
+                            f"price={price} state={state.value}{rem} "
+                            f"Sa={fsm.cycle.stake_above():.2f} "
+                            f"Sb={fsm.cycle.stake_below():.2f} "
+                            f"levels={fsm.cycle.level} open={open_pos} "
+                            f"pnl={total:+.2f}",
+                            flush=True,
+                        )
+                        last_log = now_mono
+                        last_state = state.value
+
+                    if state.value == "STOP":
+                        ended = f"STOP: {fsm.stop_reason}"
+                        print(ended, flush=True)
+                        break
+                except Exception as exc:
+                    if self._stop.is_set():
+                        break
+                    if not is_connection_error(exc):
+                        raise
+                    print(f"  !! conexao Pocket: {exc}", flush=True)
+                    ok = self._reconnect_broker(
+                        broker,
+                        asset=fsm.config.asset,
+                        max_attempts=reconnect_max,
+                    )
+                    if not ok:
+                        ended = (
+                            f"Erro: falha ao reconectar apos queda WS ({exc}). "
+                            f"SSID pode ter expirado — atualize POCKET_OPTION_SSID "
+                            f"e clique Iniciar."
+                        )
+                        with self._lock:
+                            self._last_error = ended
+                        print(ended, flush=True)
+                        break
+                    self._message = (
+                        f"Rodando | {fsm.config.asset} | 1a={dur_now}s"
+                    )
+                    continue
             else:
                 ended = "stand-by"
                 print("[web] estrategia em stand-by", flush=True)
