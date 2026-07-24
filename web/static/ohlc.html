@@ -44,8 +44,8 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Ativo <strong>fixo</strong> (não segue o bot). Grava candles de
-              <strong>1h</strong> na tabela <code>ohlc_candles</code>.
+              Ativo <strong>fixo</strong> (não segue o bot). Após o backfill,
+              busca candles de <strong>1h</strong> a cada hora (UTC + margem).
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -63,6 +63,7 @@
               <div class="status-item"><span class="label">Supabase</span><span class="value" id="s-sb">—</span></div>
               <div class="status-item"><span class="label">Último upsert</span><span class="value" id="s-last">—</span></div>
               <div class="status-item"><span class="label">Total na sessão</span><span class="value" id="s-total">—</span></div>
+              <div class="status-item"><span class="label">Próximo fetch</span><span class="value" id="s-next">—</span></div>
               <div class="status-item"><span class="label">Atualizado</span><span class="value" id="s-upd">—</span></div>
             </div>
             <p class="message" id="s-msg"></p>
@@ -170,6 +171,9 @@
           st.last_upsert != null ? String(st.last_upsert) : "—";
         document.getElementById("s-total").textContent =
           st.total_upserted != null ? String(st.total_upserted) : "—";
+        document.getElementById("s-next").textContent = st.next_fetch_at
+          ? String(st.next_fetch_at).replace("T", " ").slice(0, 19) + " UTC"
+          : "—";
         document.getElementById("s-upd").textContent = st.updated_at
           ? String(st.updated_at).replace("T", " ").slice(0, 19)
           : "—";
