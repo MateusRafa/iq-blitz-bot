@@ -170,44 +170,67 @@ class Cycle:
         loser: Direction = "below" if winner == "above" else "above"
         return self.win_pool(winner) - self.stake_of(loser)
 
+    def projected_pnl_if_active(self, winner: Direction) -> float:
+        """Como projected_pnl_if, contando PENDING no win_pool do vencedor."""
+        loser: Direction = "below" if winner == "above" else "above"
+        return self.win_pool_active(winner) - self.stake_of(loser)
+
     def projected_mark_pnl(self, price: float) -> float:
         """PnL se todas as abertas liquidassem no preco atual (cada entry propria)."""
         return self.itm_win_pool(price) - self.otm_lose_stake(price)
 
-    def target_direction(self, price: float) -> Direction | None:
-        """Âncora na 1ª ordem:
-
-        - Preço contra a 1ª → abre/reforça o hedge (lado oposto)
-        - Preço a favor da 1ª e já existe hedge → reforça o lado da 1ª
-        - Preço a favor e sem hedge → não abre nada (não inventa Baixo ganhando)
-        """
-        primary = self.primary_direction()
-        hedge = self.hedge_direction()
-        if primary is None or hedge is None:
-            return None
-
-        if self.primary_is_losing(price):
-            return hedge
-
+    def favored_direction(self, price: float) -> Direction | None:
+        """Lado que o mercado esta favorecendo agora (ancorado na 1ª)."""
         if self.primary_is_winning(price):
-            opposite = self.stake_of(hedge)
-            if opposite > 0:
-                return primary
-            return None
+            return self.primary_direction()
+        if self.primary_is_losing(price):
+            return self.hedge_direction()
+        return None
 
-        return None  # empate na entrada da 1ª
+    def in_dead_zone(self, price: float) -> bool:
+        """True se Acima e Abaixo abertos e ambos perderiam no preco atual."""
+        if self.stake_above() <= 0 or self.stake_below() <= 0:
+            return False
+        return self.itm_win_pool(price) <= 0 and self.otm_lose_stake(price) > 0
+
+    def target_direction(self, price: float) -> Direction | None:
+        """Lado a reforçar: o que o preço esta favorecendo (gate de lucro)."""
+        return self.favored_direction(price)
 
     def needs_adjustment(self, price: float, buffer: float) -> bool:
-        target = self.target_direction(price)
-        if target is None:
+        """True se o lado favorecido ainda nao projeta PnL >= buffer.
+
+        Gate de lucro (Sa/Sb). Fora da zona morta, tambem exige mark PnL >= buffer
+        quando os dois lados estao abertos.
+        """
+        fav = self.favored_direction(price)
+        if fav is None:
             return False
-        # Pendente no MESMO lado cobre mercado; pendente no oposto e seguro
-        # de reversao — nao conta como perda ate preencher.
-        if target == "above":
-            pnl = self.win_pool_active("above") - self.stake_of("below")
-        else:
-            pnl = self.win_pool_active("below") - self.stake_of("above")
-        return pnl < buffer
+
+        hedge = self.hedge_direction()
+        primary = self.primary_direction()
+        # Preco a favor sem hedge: 1ª sozinha — so ajusta se win_pool < buffer
+        if (
+            primary is not None
+            and hedge is not None
+            and fav == primary
+            and self.stake_of(hedge) <= 0
+        ):
+            return self.win_pool_active(primary) < buffer
+
+        if self.projected_pnl_if_active(fav) < buffer:
+            return True
+
+        # Mark gate: livro Sa/Sb ok, mas entries divergentes deixam mark negativo
+        if (
+            not self.in_dead_zone(price)
+            and self.stake_above() > 0
+            and self.stake_below() > 0
+            and self.projected_mark_pnl(price) < buffer
+        ):
+            return True
+
+        return False
 
     def apply_settlement(self, position: Position, exit_price: float) -> float:
         pnl = position.settle(exit_price)
