@@ -56,7 +56,7 @@ TRACK → SETTLE (now ≥ T)
   - Se não → procura outro (OTC) ≥ alvo; se ninguém tiver, pega o **maior payout**.
 - Desligar: `POCKET_AUTO_ASSET=0`.
 
-## Exposição Sa / Sb
+## Exposição Sa / Sb + gate de lucro
 
 ```
 win_pool(D) = soma(stake_i * payout_i) no lado D
@@ -65,7 +65,13 @@ delta       = ceil((buffer - win_pool(D) + S_other) / payout_atual)
 ```
 
 - Âncora de marcação = **entry da 1ª ordem** (modelo Sa/Sb).
-- Não dimensionar por ITM/OTM de cada entry: na zona entre entradas isso explode a stake.
+- **Gate de lucro (`POCKET_PROFIT_GUARD=1`, default):** enquanto o lado que o
+  preço favorece projetar PnL &lt; `buffer`, o bot **reforça esse lado** (a
+  mercado). Fora da zona morta, também reage se o mark PnL (por entry) &lt; buffer.
+- Zona morta (Acima e Abaixo ambos OTM): não explode stake por ITM/OTM; usa só Sa/Sb.
+- Se não puder reparar (`resto &lt; 5s` ou `max_levels` + bônus esgotados) → **HOLD**
+  com log `lucro descoberto`.
+- Bônus de níveis só para reparo: `POCKET_REPAIR_LEVEL_BONUS` (padrão **4**).
 - `buffer` alvo (padrão **$0,30**; env `POCKET_BUFFER`).
 - `payout_atual` vem da Pocket a cada avaliação (ordens antigas mantêm o payout delas).
 - Se o payout cair no meio do ciclo, o cruzamento aumenta a stake para preservar o buffer.
@@ -84,16 +90,16 @@ delta       = ceil((buffer - win_pool(D) + S_other) / payout_atual)
 
 ## Riscos
 
-- `base_stake`, `max_stake`, `max_levels`, `daily_loss_limit`
+- `base_stake`, `max_stake`, `max_levels`, `repair_level_bonus`, `daily_loss_limit`
 - Teste só em **DEMO** (`isDemo:1`).
 
-## Deploy Railway (DEMO 24/7)
+## Deploy Railway (portal web + bot)
 
-1. Testar local: `python run_pocket_demo.py --no-gui`
-2. Subir repo no GitHub (sem SSID no código).
-3. Railway → New Project → GitHub → este repo.
-4. Start command: `python run_pocket_demo.py --no-gui` (já em `railway.toml` / `Procfile`).
-5. Variáveis: copiar de `.env.example` (SSID DEMO obrigatório).
-6. Confirmar `PYTHONPATH=.` e `PYTHONUNBUFFERED=1`.
-7. Abrir **Logs**: connect → feed → ordens.
-8. Conta real só depois de estável em DEMO (e liberar `isDemo:0` no código).
+1. Start: `uvicorn web.app:app --host 0.0.0.0 --port $PORT` (`railway.toml`).
+2. Variáveis: `.env.example` + **`CONTROL_TOKEN`** + SSID DEMO.
+3. Gerar domínio público (Networking).
+4. Abrir URL → portal → card **Pocket Bot** → token → Iniciar / Parar + gráfico PnL.
+5. Bot fica em **stand-by** até Iniciar (não opera sozinho no boot).
+6. Conta real só depois de estável em DEMO.
+
+Local: `PYTHONPATH=. uvicorn web.app:app --reload --port 8080`
