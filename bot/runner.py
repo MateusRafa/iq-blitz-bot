@@ -84,6 +84,9 @@ def build_risk() -> RiskManager:
             payout=0.85,
             max_stake=float(os.environ.get("POCKET_MAX_STAKE", "50.0")),
             max_levels=int(os.environ.get("POCKET_MAX_LEVELS", "8")),
+            repair_level_bonus=int(
+                os.environ.get("POCKET_REPAIR_LEVEL_BONUS", "4")
+            ),
             daily_loss_limit=float(os.environ.get("POCKET_DAILY_LOSS", "20.0")),
         )
     )
@@ -103,6 +106,7 @@ def build_bot_config(*, asset: str, initial_duration: int) -> BotConfig:
         adjust_cooldown_seconds=float(
             os.environ.get("POCKET_ADJUST_COOLDOWN", "8")
         ),
+        profit_guard=env_flag_default_on("POCKET_PROFIT_GUARD", "1"),
     )
 
 
