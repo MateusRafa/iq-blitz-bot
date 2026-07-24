@@ -21,6 +21,8 @@ class RiskConfig:
 class RiskManager:
     config: RiskConfig
     daily_pnl: float = 0.0
+    wins: int = 0
+    losses: int = 0
 
     def set_payout(self, payout: float) -> None:
         """Atualiza payout vigente (fração, ex. 0.85). Usado no próximo ajuste."""
@@ -80,4 +82,13 @@ class RiskManager:
 
     def register_pnl(self, pnl: float) -> None:
         self.daily_pnl += pnl
-
+        if pnl > 0:
+            self.wins += 1
+        elif pnl < 0:
+            self.losses += 1
+
+    def reset_session_stats(self) -> None:
+        self.daily_pnl = 0.0
+        self.wins = 0
+        self.losses = 0
+
