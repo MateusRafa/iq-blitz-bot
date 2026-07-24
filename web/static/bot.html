@@ -71,6 +71,8 @@
               <div class="status-item"><span class="label">Resto T</span><span class="value" id="s-resto">—</span></div>
               <div class="status-item"><span class="label">PnL total</span><span class="value" id="s-pnl">—</span></div>
               <div class="status-item"><span class="label">Realizado</span><span class="value" id="s-daily">—</span></div>
+              <div class="status-item"><span class="label">Taxa de acerto</span><span class="value" id="s-winrate">—</span></div>
+              <div class="status-item"><span class="label">W / L</span><span class="value" id="s-wl">—</span></div>
             </div>
             <p class="message" id="s-msg"></p>
           </div>
@@ -210,6 +212,20 @@
         const dEl = document.getElementById("s-daily");
         dEl.textContent = fmtPnl(s.daily_pnl);
         dEl.className = "value " + (s.daily_pnl >= 0 ? "pos" : "neg");
+
+        const wr = s.win_rate_pct;
+        const wrEl = document.getElementById("s-winrate");
+        if (wr == null || s.settled === 0) {
+          wrEl.textContent = "—";
+          wrEl.className = "value";
+        } else {
+          wrEl.textContent = `${Number(wr).toFixed(1)}%`;
+          wrEl.className = "value " + (wr >= 50 ? "pos" : "neg");
+        }
+        const wins = s.wins != null ? s.wins : 0;
+        const losses = s.losses != null ? s.losses : 0;
+        document.getElementById("s-wl").textContent =
+          s.settled > 0 ? `${wins} / ${losses}` : "—";
 
         document.getElementById("s-msg").textContent = s.message || "";
       }
