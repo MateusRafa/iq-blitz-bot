@@ -186,6 +186,68 @@ def test_hedge_scales_with_book_not_mark_zone():
     assert plan.stake == 1.0
 
 
+def test_profit_guard_repairs_asymmetric_book():
+    """Livro pesado num lado: reforça o lado favorecido ate buffer (caso do print)."""
+    risk = RiskManager(
+        RiskConfig(buffer=0.30, payout=0.92, min_stake=1.0, max_levels=8, repair_level_bonus=4)
+    )
+    clock = PocketClock()
+    strategy = Strategy(risk=risk, clock=clock, initial_duration_seconds=60)
+    now = datetime(2026, 7, 21, 13, 50, 0, tzinfo=timezone.utc)
+    T = now + timedelta(seconds=120)
+    cycle = Cycle(anchor_expires_at=T)
+    # Acima leve, Abaixo pesado — se mercado for Acima, book negativo
+    cycle.positions.extend(
+        [
+            Position(
+                id="1",
+                direction="above",
+                stake=1.0,
+                entry_price=1.00442,
+                opened_at=now,
+                expires_at=T,
+                payout=0.92,
+            ),
+            Position(
+                id="2",
+                direction="below",
+                stake=11.73,
+                entry_price=1.00469,
+                opened_at=now,
+                expires_at=T,
+                payout=0.92,
+            ),
+            Position(
+                id="3",
+                direction="above",
+                stake=8.79,
+                entry_price=1.00450,
+                opened_at=now,
+                expires_at=T,
+                payout=0.92,
+            ),
+        ]
+    )
+    # Mercado favorece Acima (acima da 1ª)
+    price = 1.00480
+    assert cycle.favored_direction(price) == "above"
+    assert cycle.projected_pnl_if_active("above") < 0.30
+    plan = strategy.decide(cycle, price=price, now=now + timedelta(seconds=30))
+    assert plan is not None
+    assert plan.direction == "above"
+    assert plan.stake >= 1.0
+    assert "repair" in plan.reason
+
+
+def test_repair_bonus_allows_level_beyond_max():
+    risk = RiskManager(
+        RiskConfig(buffer=0.30, payout=0.92, max_levels=2, repair_level_bonus=2)
+    )
+    assert risk.can_open_level(2, repair=False) is False
+    assert risk.can_open_level(2, repair=True) is True
+    assert risk.can_open_level(4, repair=True) is False
+
+
 def test_hedge_when_primary_losing():
     risk = RiskManager(RiskConfig())
     clock = PocketClock()
@@ -657,9 +719,11 @@ if __name__ == "__main__":
     test_first_market_adjust_limit_at_anchor()
     test_adjust_can_force_market()
     test_no_hedge_while_primary_winning_without_opposite()
+    test_hedge_scales_with_book_not_mark_zone()
+    test_profit_guard_repairs_asymmetric_book()
+    test_repair_bonus_allows_level_beyond_max()
     test_hedge_when_primary_losing()
     test_lower_payout_increases_adjust_stake()
-    test_hedge_scales_with_book_not_mark_zone()
     test_fsm_adapts_payout_on_cross()
     test_fsm_same_expires_at_mid_cycle()
     test_hold_when_remaining_under_5s()
