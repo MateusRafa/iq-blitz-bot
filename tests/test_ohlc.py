@@ -1,6 +1,10 @@
 """Testes do normalizador OHLC (sem Pocket/Supabase)."""
 
-from bot.ohlc_collector import TIMEFRAMES, normalize_candle
+from bot.ohlc_collector import (
+    TIMEFRAMES,
+    normalize_candle,
+    seconds_until_next_hourly_fetch,
+)
 
 
 def test_normalize_candle_basic():
@@ -45,3 +49,9 @@ def test_normalize_candle_incomplete():
 def test_timeframes_only_1h():
     assert list(TIMEFRAMES.keys()) == ["1h"]
     assert TIMEFRAMES["1h"] == 3600
+
+
+def test_seconds_until_next_hourly_fetch_positive():
+    wait = seconds_until_next_hourly_fetch(after_hour_seconds=120)
+    assert wait >= 1.0
+    assert wait <= 3600 + 120
