@@ -13,11 +13,11 @@ def test_normalize_candle_basic():
             "close": 1.15,
         },
         asset="EURUSD_otc",
-        timeframe="5m",
+        timeframe="1h",
     )
     assert row is not None
     assert row["asset"] == "EURUSD_otc"
-    assert row["timeframe"] == "5m"
+    assert row["timeframe"] == "1h"
     assert row["open"] == 1.1
     assert row["high"] == 1.2
     assert row["low"] == 1.0
@@ -37,11 +37,11 @@ def test_normalize_candle_ms_timestamp():
 
 def test_normalize_candle_incomplete():
     assert (
-        normalize_candle({"time": 1, "open": 1}, asset="X", timeframe="5m")
+        normalize_candle({"time": 1, "open": 1}, asset="X", timeframe="1h")
         is None
     )
 
 
-def test_timeframes_six():
-    assert list(TIMEFRAMES.keys()) == ["5m", "15m", "30m", "1h", "4h", "1d"]
-    assert TIMEFRAMES["1d"] == 86400
+def test_timeframes_only_1h():
+    assert list(TIMEFRAMES.keys()) == ["1h"]
+    assert TIMEFRAMES["1h"] == 3600
