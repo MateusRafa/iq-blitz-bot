@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from bot.ohlc_collector import collector
 from bot.runner import MIN_DURATION, runner
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -24,6 +25,14 @@ class DurationBody(BaseModel):
 
     seconds: int | None = Field(default=None, ge=MIN_DURATION)
     minutes: float | None = Field(default=None, gt=0)
+
+
+class OhlcAssetBody(BaseModel):
+    asset: str = Field(min_length=1, max_length=64)
+
+
+class OhlcStartBody(BaseModel):
+    asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 def _control_token() -> str:
@@ -55,11 +64,19 @@ def bot_page() -> FileResponse:
     return FileResponse(STATIC / "bot.html")
 
 
+@app.get("/ohlc")
+def ohlc_page() -> FileResponse:
+    return FileResponse(STATIC / "ohlc.html")
+
+
 @app.get("/api/health")
 def health() -> dict:
+    st = collector.status()
     return {
         "ok": True,
         "bot_running": runner.is_running(),
+        "ohlc_running": collector.is_running(),
+        "supabase_ok": bool(st.get("supabase_ok")),
         "token_configured": bool(_control_token()),
         "duration_seconds": runner.get_duration_seconds(),
     }
@@ -99,3 +116,34 @@ def bot_duration(
             detail="Informe seconds ou minutes.",
         )
     return runner.set_duration_seconds(sec)
+
+
+@app.get("/api/ohlc/status")
+def ohlc_status(_: None = Depends(require_token)) -> dict:
+    return collector.status()
+
+
+@app.post("/api/ohlc/asset")
+def ohlc_asset(
+    body: OhlcAssetBody, _: None = Depends(require_token)
+) -> dict:
+    try:
+        return collector.set_asset(body.asset)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ohlc/start")
+def ohlc_start(
+    body: OhlcStartBody = OhlcStartBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        return collector.start(body.asset)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ohlc/stop")
+def ohlc_stop(_: None = Depends(require_token)) -> dict:
+    return collector.stop()
