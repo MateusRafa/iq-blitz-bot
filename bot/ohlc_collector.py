@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from BinaryOptionsToolsV2.pocketoption import PocketOption
@@ -26,7 +26,7 @@ BACKFILL_OFFSET: dict[str, int] = {
     "1h": 30 * 86400,  # ~30 dias
 }
 
-# No loop ao vivo: so as velas recentes (offset em segundos).
+# No loop horario: velas recentes (offset em segundos).
 LIVE_OFFSET: dict[str, int] = {
     "1h": 3600 * 12,  # ~12 velas
 }
@@ -40,6 +40,23 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _env_flag_default_on(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def seconds_until_next_hourly_fetch(*, after_hour_seconds: int) -> float:
+    """Segundos ate o proximo fetch alinhado a hora UTC + margem."""
+    now = datetime.now(timezone.utc)
+    next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    target = next_hour + timedelta(seconds=max(after_hour_seconds, 0))
+    wait = (target - now).total_seconds()
+    return max(wait, 1.0)
 
 
 def _default_asset() -> str:
@@ -121,6 +138,8 @@ class OhlcCollector:
             "phase": "idle",
             "last_upsert": 0,
             "total_upserted": 0,
+            "next_fetch_at": None,
+            "poll_mode": "hourly",
             "per_tf": {tf: {"ok": 0, "err": None} for tf in TIMEFRAMES},
             "error": None,
             "updated_at": None,
@@ -249,9 +268,46 @@ class OhlcCollector:
         time.sleep(max(wait, 2.0))
         return client
 
+    def _close_client(self, client: PocketOption | None) -> None:
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        end = time.monotonic() + max(seconds, 0.0)
+        while not self._stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(left, 1.0))
+
+    def _wait_for_next_cycle(self) -> None:
+        """Espera ate a proxima coleta (alinhada a hora UTC por padrao)."""
+        align = _env_flag_default_on("OHLC_ALIGN_HOUR", "1")
+        after = _env_int("OHLC_AFTER_HOUR_SECONDS", 120)
+        if align:
+            wait = seconds_until_next_hourly_fetch(after_hour_seconds=after)
+            mode = "hourly"
+        else:
+            wait = float(max(_env_int("OHLC_POLL_SECONDS", 3600), 60))
+            mode = "poll"
+        next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
+        self._set(
+            phase="waiting",
+            poll_mode=mode,
+            next_fetch_at=next_at.isoformat(),
+            message=(
+                f"Proximo fetch em ~{int(wait // 60)} min "
+                f"({next_at.strftime('%H:%M:%S')} UTC)"
+            ),
+        )
+        self._sleep_interruptible(wait)
+
     def _run(self) -> None:
         asset = self._asset
-        poll = max(_env_int("OHLC_POLL_SECONDS", 30), 5)
         client: PocketOption | None = None
         try:
             self._set(phase="connect", message=f"Conectando Pocket ({asset})…")
@@ -275,41 +331,52 @@ class OhlcCollector:
                         }
                     self._set(message=f"Backfill {tf} falhou: {exc}")
 
-            self._set(phase="live", message="Coletando ao vivo…")
+            # Fecha apos backfill; reconecta a cada ciclo horario.
+            self._close_client(client)
+            client = None
+
             while not self._stop.is_set():
-                for tf in TIMEFRAMES:
-                    if self._stop.is_set():
-                        break
-                    try:
-                        self._upsert_tf(
-                            client, asset, tf, LIVE_OFFSET[tf]
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        with self._lock:
-                            cur = self._snap["per_tf"].get(tf, {})
-                            self._snap["per_tf"][tf] = {
-                                "ok": cur.get("ok", 0),
-                                "err": str(exc)[:200],
-                            }
-                        if is_connection_error(exc):
-                            self._set(
-                                phase="reconnect",
-                                message=f"Reconectando… ({exc})",
-                            )
-                            try:
-                                if client is not None:
-                                    client.close()
-                            except Exception:  # noqa: BLE001
-                                pass
-                            time.sleep(3.0)
-                            client = self._connect()
-                            self._set(phase="live", message="Reconectado")
+                self._wait_for_next_cycle()
+                if self._stop.is_set():
+                    break
+                try:
+                    self._set(
+                        phase="fetch",
+                        message=f"Buscando 1h ({asset})…",
+                        next_fetch_at=None,
+                    )
+                    client = self._connect()
+                    for tf in TIMEFRAMES:
+                        if self._stop.is_set():
                             break
-                # espera com saida cedo no stop
-                for _ in range(poll):
-                    if self._stop.is_set():
-                        break
-                    time.sleep(1.0)
+                        try:
+                            n = self._upsert_tf(
+                                client, asset, tf, LIVE_OFFSET[tf]
+                            )
+                            self._set(message=f"Fetch {tf}: {n} velas")
+                        except Exception as exc:  # noqa: BLE001
+                            with self._lock:
+                                cur = self._snap["per_tf"].get(tf, {})
+                                self._snap["per_tf"][tf] = {
+                                    "ok": cur.get("ok", 0),
+                                    "err": str(exc)[:200],
+                                }
+                            if is_connection_error(exc):
+                                self._set(
+                                    phase="reconnect",
+                                    message=f"Reconectando… ({exc})",
+                                )
+                                self._close_client(client)
+                                time.sleep(3.0)
+                                client = self._connect()
+                                self._upsert_tf(
+                                    client, asset, tf, LIVE_OFFSET[tf]
+                                )
+                except Exception as exc:  # noqa: BLE001
+                    self._set(message=f"Ciclo falhou: {exc}")
+                finally:
+                    self._close_client(client)
+                    client = None
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error",
@@ -318,16 +385,13 @@ class OhlcCollector:
                 running=False,
             )
         finally:
-            try:
-                if client is not None:
-                    client.close()
-            except Exception:  # noqa: BLE001
-                pass
+            self._close_client(client)
             with self._lock:
                 if not self._stop.is_set() and self._snap.get("phase") != "error":
                     self._snap["phase"] = "idle"
                     self._snap["message"] = "Parado"
                 self._snap["running"] = False
+                self._snap["next_fetch_at"] = None
 
 
 collector = OhlcCollector()
