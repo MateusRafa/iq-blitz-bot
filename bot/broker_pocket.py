@@ -88,6 +88,10 @@ class PocketBroker:
         # Pocket as vezes responde openPendingOrder com {_placeholder, num} sem ticket.
         # Apos isso, pular pendente → mercado imediato (evita atrasar e alargar o gap).
         self._pending_api_ok = True
+        self._require_demo = require_demo
+        self._connect_wait_seconds = float(connect_wait_seconds)
+        self._last_feed_mono = 0.0
+        self._reconnect_lock = threading.Lock()
 
     @property
     def pending_api_ok(self) -> bool:
@@ -101,6 +105,77 @@ class PocketBroker:
             f"  !! pendente API indisponivel nesta sessao ({reason}); "
             f"ajustes seguem so a MERCADO (sem atrasar o fill)"
         )
+
+    def feed_age_seconds(self) -> float:
+        """Segundos desde o ultimo tick de preco no feed (inf se nunca recebeu)."""
+        if self._last_feed_mono <= 0:
+            return float("inf")
+        return time.monotonic() - self._last_feed_mono
+
+    def reconnect(
+        self,
+        *,
+        asset: str | None = None,
+        connect_wait_seconds: float | None = None,
+        feed_wait_seconds: float = 15.0,
+    ) -> float | None:
+        """Recria clientes WebSocket apos queda (half-closed channel, etc.).
+
+        Mantem a mesma instancia do broker (a FSM continua apontando para self).
+        Retorna o primeiro preco do feed ou None.
+        """
+        with self._reconnect_lock:
+            target = asset or self._feed_asset
+            wait = (
+                self._connect_wait_seconds
+                if connect_wait_seconds is None
+                else float(connect_wait_seconds)
+            )
+            print("  !! reconectando Pocket (WS)...")
+            self._stop_feed.set()
+            self._price_event.set()
+            t = self._feed_thread
+            if t is not None and t.is_alive():
+                t.join(timeout=3.0)
+            self._feed_thread = None
+
+            for client in (self._price_client, self._client):
+                try:
+                    if self._feed_asset:
+                        client.unsubscribe(self._feed_asset)
+                except Exception:
+                    pass
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+            from BinaryOptionsToolsV2.pocketoption import PocketOption
+
+            self._client = PocketOption(ssid=self._ssid)
+            time.sleep(wait)
+            if self._require_demo and not self._client.is_demo():
+                raise RuntimeError(
+                    "Apos reconnect: conta REAL detectada (isDemo != 1)."
+                )
+            self._price_client = PocketOption(ssid=self._ssid)
+            time.sleep(2.0)
+
+            self._stop_feed.clear()
+            self._payout_cache.clear()
+            self._all_payouts_cache = None
+            self._last_feed_mono = 0.0
+            # Nao reativa pendente automaticamente; continua mercado se ja tinha falhado.
+
+            if not target:
+                print("  << reconnect clientes ok (sem asset de feed)")
+                return None
+            px = self.start_price_feed(target, wait_seconds=feed_wait_seconds)
+            if px is not None:
+                print(f"  << reconnect ok asset={target} price={px}")
+            else:
+                print(f"  !! reconnect: clientes ok mas feed sem preco ({target})")
+            return px
 
     @property
     def client(self) -> Any:
@@ -711,6 +786,7 @@ class PocketBroker:
         with self._lock:
             prev = self._last_price.get(asset)
             self._last_price[asset] = price
+        self._last_feed_mono = time.monotonic()
         if prev is None:
             self._last_price_signal = time.monotonic()
             self._price_event.set()
