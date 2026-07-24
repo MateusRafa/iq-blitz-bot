@@ -14,6 +14,8 @@ class RiskConfig:
     payout: float = 0.85
     max_stake: float = 50.0
     max_levels: int = 8
+    # Niveis extras so para reparar lucro (livro descoberto no lado favorecido).
+    repair_level_bonus: int = 4
     daily_loss_limit: float = 20.0
 
 
@@ -74,8 +76,11 @@ class RiskManager:
             return None
         return max(stake, self.config.min_stake)
 
-    def can_open_level(self, level: int) -> bool:
-        return level < self.config.max_levels
+    def can_open_level(self, level: int, *, repair: bool = False) -> bool:
+        limit = self.config.max_levels
+        if repair:
+            limit += max(0, int(self.config.repair_level_bonus))
+        return level < limit
 
     def hit_daily_stop(self) -> bool:
         return self.daily_pnl <= -abs(self.config.daily_loss_limit)
@@ -91,4 +96,3 @@ class RiskManager:
         self.daily_pnl = 0.0
         self.wins = 0
         self.losses = 0
-
