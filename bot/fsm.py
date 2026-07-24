@@ -69,6 +69,8 @@ class BotConfig:
     preplace_sustain_seconds: float = 0.0
     # Anti-whipsaw: nao inverte lado a mercado antes deste intervalo.
     adjust_cooldown_seconds: float = 8.0
+    # Gate de lucro: reforca lado favorecido ate book/mark >= buffer.
+    profit_guard: bool = True
 
 
 @dataclass
@@ -91,6 +93,7 @@ class PocketFSM:
         self.strategy.risk = self.risk
         self.strategy.clock = self.clock
         self.strategy.initial_duration_seconds = self.config.initial_duration_seconds
+        self.strategy.profit_guard = self.config.profit_guard
 
     def set_initial_duration(self, seconds: int) -> None:
         """Atualiza duração da próxima 1ª ordem (ciclo em andamento mantém o T atual)."""
@@ -211,8 +214,18 @@ class PocketFSM:
             ):
                 if self.cycle.needs_adjustment(price, self.risk.config.buffer):
                     reason = self.clock.hold_reason(now, anchor)
+                    fav = self.cycle.favored_direction(price)
+                    book = (
+                        self.cycle.projected_pnl_if_active(fav)
+                        if fav is not None
+                        else 0.0
+                    )
+                    mark = self.cycle.projected_mark_pnl(price)
                     if reason and self.state != State.HOLD:
-                        print(f"  !! HOLD (cruzamento sem abrir): {reason}")
+                        print(
+                            f"  !! HOLD (lucro descoberto, sem tempo): {reason} "
+                            f"fav={fav} book={book:+.2f} mark={mark:+.2f}"
+                        )
                     self._cancel_all_insurance()
                     self.state = State.HOLD
                 else:
@@ -226,14 +239,24 @@ class PocketFSM:
             if plan is None:
                 if not self.cycle.positions:
                     self.state = State.IDLE
-                elif not self.risk.can_open_level(self.cycle.level) and self.cycle.needs_adjustment(
+                elif self.cycle.needs_adjustment(
                     price, self.risk.config.buffer
+                ) and not self.risk.can_open_level(
+                    self.cycle.level, repair=True
                 ):
-                    # Nao STOP com posicoes abertas: espera T (livro pode ficar
-                    # descoberto num lado — melhor que cascata ate o limite).
+                    fav = self.cycle.favored_direction(price)
+                    book = (
+                        self.cycle.projected_pnl_if_active(fav)
+                        if fav is not None
+                        else 0.0
+                    )
+                    mark = self.cycle.projected_mark_pnl(price)
                     if self.state != State.HOLD:
                         print(
-                            "  !! HOLD (max_levels; sem novos cruzamentos ate T)"
+                            "  !! HOLD (lucro descoberto; max_levels+"
+                            f"repair esgotados) fav={fav} "
+                            f"book={book:+.2f} mark={mark:+.2f} "
+                            f"levels={self.cycle.level}"
                         )
                     self._cancel_all_insurance()
                     self.state = State.HOLD
