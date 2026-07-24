@@ -98,6 +98,7 @@ class BotRunner:
         )
         self._duration_seconds = max(MIN_DURATION, env_dur)
         self._fsm: PocketFSM | None = None
+        self._risk: RiskManager | None = None
 
     def get_duration_seconds(self) -> int:
         with self._duration_lock:
@@ -146,6 +147,10 @@ class BotRunner:
             "mark_pnl": 0.0,
             "total_pnl": 0.0,
             "duration_seconds": DEFAULT_DURATION,
+            "wins": 0,
+            "losses": 0,
+            "settled": 0,
+            "win_rate_pct": None,
             "message": "Stand-by",
             "updated_at": None,
         }
@@ -200,6 +205,18 @@ class BotRunner:
             out["message"] = self._message
             out["last_error"] = self._last_error
             out["duration_seconds"] = self.get_duration_seconds()
+            risk = self._risk
+            wins = int(risk.wins) if risk is not None else int(out.get("wins") or 0)
+            losses = (
+                int(risk.losses) if risk is not None else int(out.get("losses") or 0)
+            )
+            settled = wins + losses
+            out["wins"] = wins
+            out["losses"] = losses
+            out["settled"] = settled
+            out["win_rate_pct"] = (
+                round(100.0 * wins / settled, 1) if settled > 0 else None
+            )
             return out
 
     def pnl_series(self) -> list[dict[str, Any]]:
@@ -270,6 +287,8 @@ class BotRunner:
             clock = PocketClock()
             clock.set_allowed_durations(broker.load_allowed_durations(asset))
             risk = build_risk()
+            with self._lock:
+                self._risk = risk
             fsm = PocketFSM(
                 clock=clock,
                 risk=risk,
@@ -323,6 +342,13 @@ class BotRunner:
                 if anchor is not None:
                     resto = max(0.0, (anchor - now).total_seconds())
 
+                wins = int(risk.wins)
+                losses = int(risk.losses)
+                settled = wins + losses
+                win_rate = (
+                    round(100.0 * wins / settled, 1) if settled > 0 else None
+                )
+
                 self._record_pnl(daily=daily, mark=mark, total=total)
                 self._update_snap(
                     running=True,
@@ -337,6 +363,10 @@ class BotRunner:
                     mark_pnl=round(mark, 4),
                     total_pnl=round(total, 4),
                     duration_seconds=dur_now,
+                    wins=wins,
+                    losses=losses,
+                    settled=settled,
+                    win_rate_pct=win_rate,
                 )
 
                 now_mono = time.monotonic()
@@ -379,6 +409,7 @@ class BotRunner:
             with self._lock:
                 self._running = False
                 self._fsm = None
+                # Mantem _risk para status mostrar W/L apos Parar ate o proximo Iniciar
                 self._message = (
                     "Stand-by. Clique Iniciar na ferramenta Bot."
                     if ended == "stand-by"
@@ -387,6 +418,15 @@ class BotRunner:
                 self._snap["running"] = False
                 self._snap["message"] = self._message
                 self._snap["state"] = "IDLE"
+                if self._risk is not None:
+                    w, l = self._risk.wins, self._risk.losses
+                    st = w + l
+                    self._snap["wins"] = w
+                    self._snap["losses"] = l
+                    self._snap["settled"] = st
+                    self._snap["win_rate_pct"] = (
+                        round(100.0 * w / st, 1) if st > 0 else None
+                    )
                 self._thread = None
 
 
