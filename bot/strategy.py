@@ -1,9 +1,10 @@
-"""Decisão de abertura: 1ª a mercado; ajustes na âncora (limite) com fallback."""
+"""Decisão de abertura: 1ª a mercado; ajustes com gate de lucro."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import ceil
 from typing import Literal
 
 from bot.clock import PocketClock
@@ -47,6 +48,8 @@ class Strategy:
     # Pendente cola na âncora, mas a API Pocket pode falhar (_placeholder).
     # Default mercado; ative com POCKET_USE_LIMIT=1 quando pendente funcionar.
     use_limit_for_adjust: bool = False
+    # Gate: reforça lado favorecido ate livro/mark >= buffer.
+    profit_guard: bool = True
 
     def decide(
         self,
@@ -78,7 +81,8 @@ class Strategy:
                 order_kind="market",
             )
 
-        if not risk.can_open_level(cycle.level):
+        needs = cycle.needs_adjustment(price, risk.config.buffer)
+        if not risk.can_open_level(cycle.level, repair=needs):
             return None
 
         anchor = cycle.anchor_expires_at
@@ -89,18 +93,29 @@ class Strategy:
         if duration is None:
             return None  # resto < min → HOLD na FSM
 
-        if not cycle.needs_adjustment(price, risk.config.buffer):
+        if not needs:
             return None
 
         target = cycle.target_direction(price)
         if target is None:
             return None
+        # Sem hedge e preco a favor: so reforca se win_pool < buffer (needs ja filtrou)
+        hedge = cycle.hedge_direction()
+        primary = cycle.primary_direction()
+        if (
+            primary is not None
+            and hedge is not None
+            and target == primary
+            and cycle.stake_of(hedge) <= 0
+            and cycle.win_pool_active(primary) >= risk.config.buffer
+        ):
+            return None
 
         sa = cycle.stake_above()
         sb = cycle.stake_below()
         payout = risk.config.payout
-        # Mesmo lado: OPEN+PENDING cobre. Lado oposto: so OPEN (pendente
-        # oposto e seguro de reversao, nao perda ate o fill).
+        buffer = risk.config.buffer
+
         if target == "above":
             delta = risk.delta_to_cover(
                 target_win_pool=cycle.win_pool_active("above"),
@@ -113,6 +128,21 @@ class Strategy:
                 other_stake=cycle.stake_of("above"),
                 new_payout=payout,
             )
+
+        # Mark gate (fora da zona morta): cobre shortfall real por entry
+        if (
+            self.profit_guard
+            and not cycle.in_dead_zone(price)
+            and sa > 0
+            and sb > 0
+        ):
+            mark = cycle.projected_mark_pnl(price)
+            if mark < buffer and payout > 0:
+                extra = (buffer - mark) / payout
+                cents = ceil(extra * 100)
+                extra_delta = max(cents / 100.0, risk.config.min_stake)
+                if extra_delta > delta:
+                    delta = extra_delta
 
         if delta <= 0:
             return None
@@ -128,12 +158,15 @@ class Strategy:
             order_kind = "limit"
             limit_price = add_points(first_entry, self.limit_points)
 
+        book = cycle.projected_pnl_if_active(target)
+        mark = cycle.projected_mark_pnl(price)
         return TradePlan(
             direction=target,
             stake=clamped,
             duration_seconds=duration,
             reason=(
-                f"adjust {target} Sa={sa:.2f} Sb={sb:.2f} "
+                f"repair {target} Sa={sa:.2f} Sb={sb:.2f} "
+                f"book={book:+.2f} mark={mark:+.2f} "
                 f"payout={payout * 100:.0f}%"
             ),
             order_kind=order_kind,
