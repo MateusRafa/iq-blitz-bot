@@ -194,6 +194,11 @@
           borderDownColor: "#f43f5e",
           wickUpColor: "#22d3ee",
           wickDownColor: "#f43f5e",
+          priceFormat: {
+            type: "price",
+            precision: 5,
+            minMove: 0.00001,
+          },
         });
         window.addEventListener("resize", () => {
           if (!chart) return;
