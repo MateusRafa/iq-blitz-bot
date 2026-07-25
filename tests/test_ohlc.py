@@ -55,3 +55,7 @@ def test_seconds_until_next_hourly_fetch_positive():
     wait = seconds_until_next_hourly_fetch(after_hour_seconds=120)
     assert wait >= 1.0
     assert wait <= 3600 + 120
+
+
+def test_timeframes_period_matches_1h():
+    assert TIMEFRAMES["1h"] == 3600
