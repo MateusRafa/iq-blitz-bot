@@ -5,6 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Coletor OHLC — IQ Blitz</title>
     <link rel="stylesheet" href="/static/portal.css" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+      .chart-wrap {
+        width: 100%;
+        height: min(420px, 55vh);
+        margin-top: 0.75rem;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(34, 211, 238, 0.25);
+        background: #0a1220;
+      }
+      #ohlc-chart {
+        width: 100%;
+        height: 100%;
+      }
+      .chart-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #94a3b8;
+        font-size: 0.95rem;
+        padding: 1rem;
+        text-align: center;
+      }
+    </style>
   </head>
   <body>
     <div class="portal-root">
@@ -17,7 +43,7 @@
               </a>
               <div class="portal-header-text">
                 <h1 class="portal-header-title">Coletor OHLC</h1>
-                <p class="portal-header-subtitle">Pocket → Supabase (ativo fixo)</p>
+                <p class="portal-header-subtitle">Pocket → Supabase + gráfico próprio</p>
               </div>
             </div>
           </div>
@@ -44,8 +70,8 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Ativo <strong>fixo</strong> (não segue o bot). Após o backfill,
-              busca candles de <strong>1h</strong> a cada hora (UTC + margem).
+              Ativo <strong>fixo</strong>. Sync puxa só o que falta a partir do
+              <strong>último candle salvo</strong> no Supabase.
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -55,14 +81,17 @@
             <div class="controls" style="margin-top:0.85rem">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
             <div class="status-grid">
               <div class="status-item"><span class="label">Fase</span><span class="value" id="s-phase">—</span></div>
               <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
               <div class="status-item"><span class="label">Supabase</span><span class="value" id="s-sb">—</span></div>
+              <div class="status-item"><span class="label">Salvos (DB)</span><span class="value" id="s-stored">—</span></div>
+              <div class="status-item"><span class="label">Último no DB</span><span class="value" id="s-stored-last">—</span></div>
+              <div class="status-item"><span class="label">Upsert sessão</span><span class="value" id="s-total">—</span></div>
               <div class="status-item"><span class="label">Último upsert</span><span class="value" id="s-last">—</span></div>
-              <div class="status-item"><span class="label">Total na sessão</span><span class="value" id="s-total">—</span></div>
               <div class="status-item"><span class="label">Próximo fetch</span><span class="value" id="s-next">—</span></div>
               <div class="status-item"><span class="label">Atualizado</span><span class="value" id="s-upd">—</span></div>
             </div>
@@ -72,6 +101,16 @@
           <div class="panel">
             <h2>Timeframe 1h</h2>
             <div class="status-grid" id="tf-grid"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Gráfico (dados do Supabase)</h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.5rem" id="chart-meta">
+              —
+            </p>
+            <div class="chart-wrap">
+              <div id="ohlc-chart"></div>
+            </div>
           </div>
         </div>
       </main>
@@ -117,12 +156,119 @@
       const btnStop = document.getElementById("btn-stop");
       const assetInput = document.getElementById("asset-input");
       const tfGrid = document.getElementById("tf-grid");
+      const chartEl = document.getElementById("ohlc-chart");
+      const chartMeta = document.getElementById("chart-meta");
+
+      let chart = null;
+      let candleSeries = null;
+      let lastChartAsset = "";
+      let lastChartCount = -1;
 
       for (const tf of TFS) {
         const div = document.createElement("div");
         div.className = "status-item";
         div.innerHTML = `<span class="label">${tf}</span><span class="value" id="tf-${tf}">—</span>`;
         tfGrid.appendChild(div);
+      }
+
+      function ensureChart() {
+        if (chart || typeof LightweightCharts === "undefined") return;
+        chart = LightweightCharts.createChart(chartEl, {
+          layout: {
+            background: { color: "#0a1220" },
+            textColor: "#94a3b8",
+          },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: { borderColor: "rgba(34,211,238,0.25)" },
+          timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
+          width: chartEl.clientWidth,
+          height: chartEl.clientHeight,
+        });
+        candleSeries = chart.addCandlestickSeries({
+          upColor: "#22d3ee",
+          downColor: "#f43f5e",
+          borderUpColor: "#22d3ee",
+          borderDownColor: "#f43f5e",
+          wickUpColor: "#22d3ee",
+          wickDownColor: "#f43f5e",
+        });
+        window.addEventListener("resize", () => {
+          if (!chart) return;
+          chart.applyOptions({
+            width: chartEl.clientWidth,
+            height: chartEl.clientHeight,
+          });
+        });
+      }
+
+      function toChartTime(iso) {
+        const ms = Date.parse(iso);
+        if (Number.isNaN(ms)) return null;
+        return Math.floor(ms / 1000);
+      }
+
+      async function loadChart(asset, force) {
+        ensureChart();
+        if (!candleSeries) {
+          chartMeta.textContent = "Biblioteca de gráfico indisponível.";
+          return;
+        }
+        try {
+          const q = new URLSearchParams({
+            asset: asset || "",
+            timeframe: "1h",
+            limit: "300",
+          });
+          const data = await api("/api/ohlc/candles?" + q.toString());
+          const rows = data.candles || [];
+          if (
+            !force &&
+            data.asset === lastChartAsset &&
+            rows.length === lastChartCount
+          ) {
+            return;
+          }
+          lastChartAsset = data.asset || "";
+          lastChartCount = rows.length;
+          if (!rows.length) {
+            candleSeries.setData([]);
+            chartMeta.textContent =
+              "Nenhum candle no Supabase para " +
+              (data.asset || asset || "—") +
+              ". Inicie o coletor para gravar.";
+            return;
+          }
+          const series = [];
+          for (const r of rows) {
+            const t = toChartTime(r.opened_at);
+            if (t == null) continue;
+            series.push({
+              time: t,
+              open: Number(r.open),
+              high: Number(r.high),
+              low: Number(r.low),
+              close: Number(r.close),
+            });
+          }
+          candleSeries.setData(series);
+          chart.timeScale().fitContent();
+          const first = rows[0].opened_at;
+          const last = rows[rows.length - 1].opened_at;
+          chartMeta.textContent =
+            data.asset +
+            " · 1h · " +
+            rows.length +
+            " velas · " +
+            String(first).replace("T", " ").slice(0, 16) +
+            " → " +
+            String(last).replace("T", " ").slice(0, 16) +
+            " UTC";
+        } catch (e) {
+          chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
+        }
       }
 
       function showAuth(err) {
@@ -152,6 +298,11 @@
         cmdErro.textContent = msg;
       }
 
+      function fmtTs(v) {
+        if (!v) return "—";
+        return String(v).replace("T", " ").slice(0, 19) + " UTC";
+      }
+
       function render(st) {
         const running = !!st.running;
         badge.textContent = running ? "COLETANDO" : "STAND-BY";
@@ -167,12 +318,20 @@
         document.getElementById("s-sb").textContent = st.supabase_ok
           ? "ok"
           : (st.supabase_msg || "não configurado");
+        const stored = st.stored_count;
+        document.getElementById("s-stored").textContent =
+          stored != null
+            ? String(stored)
+            : st.stored_err
+              ? "erro"
+              : "—";
+        document.getElementById("s-stored-last").textContent = fmtTs(st.stored_last);
         document.getElementById("s-last").textContent =
           st.last_upsert != null ? String(st.last_upsert) : "—";
         document.getElementById("s-total").textContent =
           st.total_upserted != null ? String(st.total_upserted) : "—";
         document.getElementById("s-next").textContent = st.next_fetch_at
-          ? String(st.next_fetch_at).replace("T", " ").slice(0, 19) + " UTC"
+          ? fmtTs(st.next_fetch_at)
           : "—";
         document.getElementById("s-upd").textContent = st.updated_at
           ? String(st.updated_at).replace("T", " ").slice(0, 19)
@@ -186,7 +345,7 @@
           if (row.err) {
             el.textContent = "erro: " + row.err;
           } else {
-            el.textContent = (row.ok != null ? row.ok : 0) + " upserts";
+            el.textContent = (row.ok != null ? row.ok : 0) + " upserts sessão";
           }
         }
       }
@@ -194,6 +353,8 @@
       async function refresh() {
         const st = await api("/api/ohlc/status");
         render(st);
+        await loadChart(st.asset || assetInput.value.trim(), false);
+        return st;
       }
 
       document.getElementById("token-save").addEventListener("click", async () => {
@@ -213,6 +374,7 @@
             asset: assetInput.value.trim(),
           });
           render(st);
+          await loadChart(st.asset, true);
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
@@ -235,6 +397,16 @@
         try {
           const st = await api("/api/ohlc/stop", "POST");
           render(st);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-reload-chart").addEventListener("click", async () => {
+        try {
+          await loadChart(assetInput.value.trim(), true);
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
@@ -259,7 +431,7 @@
       setInterval(() => {
         if (appBox.hidden) return;
         refresh().catch(() => {});
-      }, 2500);
+      }, 4000);
     </script>
   </body>
 </html>
