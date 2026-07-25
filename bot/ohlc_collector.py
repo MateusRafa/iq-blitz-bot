@@ -13,7 +13,12 @@ from typing import Any
 
 from BinaryOptionsToolsV2.pocketoption import PocketOption
 
-from bot.ohlc_store import supabase_ok, upsert_candles
+from bot.ohlc_store import (
+    last_opened_at,
+    stored_summary,
+    supabase_ok,
+    upsert_candles,
+)
 from bot.runner import is_connection_error, load_ssid, normalize_asset
 
 # label UI → segundos da vela (somente 1h)
@@ -144,13 +149,24 @@ class OhlcCollector:
             "error": None,
             "updated_at": None,
             "message": "Stand-by",
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": None,
         }
         self._refresh_supabase_flag()
+        self._refresh_stored()
 
     def _refresh_supabase_flag(self) -> None:
         ok, msg = supabase_ok()
         self._snap["supabase_ok"] = ok
         self._snap["supabase_msg"] = msg
+
+    def _refresh_stored(self) -> None:
+        """Le contagem/ultimo candle do Supabase (independente da sessao)."""
+        summary = stored_summary(self._asset, "1h")
+        self._snap["stored_count"] = summary.get("stored_count")
+        self._snap["stored_last"] = summary.get("stored_last")
+        self._snap["stored_err"] = summary.get("stored_err")
 
     def is_running(self) -> bool:
         t = self._thread
@@ -159,11 +175,11 @@ class OhlcCollector:
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._refresh_supabase_flag()
+            self._refresh_stored()
             out = dict(self._snap)
             out["running"] = self.is_running()
             out["asset"] = self._asset
             return out
-
     def set_asset(self, asset: str) -> dict[str, Any]:
         a = normalize_asset(asset)
         if not a:
@@ -176,6 +192,7 @@ class OhlcCollector:
             self._asset = a
             self._snap["asset"] = a
             self._snap["message"] = f"Ativo definido: {a}"
+            self._refresh_stored()
         return self.status()
 
     def start(self, asset: str | None = None) -> dict[str, Any]:
@@ -229,6 +246,24 @@ class OhlcCollector:
             self._snap.update(kwargs)
             self._snap["updated_at"] = datetime.now(timezone.utc).isoformat()
 
+    def _offset_for_tf(self, asset: str, tf: str, *, backfill: bool) -> int:
+        """Offset em segundos: do ultimo salvo ate agora (+folga), ou historico cheio."""
+        period = TIMEFRAMES[tf]
+        default = BACKFILL_OFFSET[tf] if backfill else LIVE_OFFSET[tf]
+        try:
+            last = last_opened_at(asset, tf)
+        except Exception:  # noqa: BLE001
+            return default
+        if last is None:
+            return default
+        now = datetime.now(timezone.utc)
+        # Folga: 3 velas para regravar a ultima (pode estar incompleta) + margem
+        gap = int((now - last).total_seconds()) + period * 3
+        # Nunca pedir menos que LIVE; no backfill, se gap pequeno, so incremental
+        if backfill:
+            return max(gap, period * 3)
+        return max(min(gap, default), period * 2)
+
     def _fetch_tf(
         self, client: PocketOption, asset: str, tf: str, offset: int
     ) -> list[dict[str, Any]]:
@@ -246,9 +281,40 @@ class OhlcCollector:
         return rows
 
     def _upsert_tf(
-        self, client: PocketOption, asset: str, tf: str, offset: int
+        self,
+        client: PocketOption,
+        asset: str,
+        tf: str,
+        *,
+        backfill: bool = False,
     ) -> int:
+        offset = self._offset_for_tf(asset, tf, backfill=backfill)
         rows = self._fetch_tf(client, asset, tf, offset)
+        if not rows:
+            return 0
+        # Se ja ha historico, so envia velas >= (ultimo - 1 periodo) para nao
+        # reenviar 30 dias a cada start — upsert ainda e idempotente.
+        try:
+            last = last_opened_at(asset, tf)
+        except Exception:  # noqa: BLE001
+            last = None
+        if last is not None:
+            period = TIMEFRAMES[tf]
+            cutoff = last - timedelta(seconds=period)
+            filtered: list[dict[str, Any]] = []
+            for row in rows:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(row["opened_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    filtered.append(row)
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= cutoff:
+                    filtered.append(row)
+            rows = filtered
         if not rows:
             return 0
         n = upsert_candles(rows)
@@ -259,6 +325,7 @@ class OhlcCollector:
             self._snap["total_upserted"] = int(
                 self._snap.get("total_upserted", 0) or 0
             ) + n
+            self._refresh_stored()
         return n
 
     def _connect(self) -> PocketOption:
@@ -312,16 +379,25 @@ class OhlcCollector:
         try:
             self._set(phase="connect", message=f"Conectando Pocket ({asset})…")
             client = self._connect()
-            self._set(phase="backfill", message="Backfill historico…")
+            self._refresh_stored()
+            stored = int(self._snap.get("stored_count") or 0)
+            self._set(
+                phase="backfill",
+                message=(
+                    f"Sync incremental ({stored} velas ja no Supabase)…"
+                    if stored > 0
+                    else "Backfill historico (base vazia)…"
+                ),
+            )
             for tf in TIMEFRAMES:
                 if self._stop.is_set():
                     break
                 try:
                     n = self._upsert_tf(
-                        client, asset, tf, BACKFILL_OFFSET[tf]
+                        client, asset, tf, backfill=True
                     )
                     self._set(
-                        message=f"Backfill {tf}: {n} velas",
+                        message=f"Sync {tf}: {n} velas novas/atualizadas",
                     )
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
@@ -329,7 +405,7 @@ class OhlcCollector:
                             "ok": 0,
                             "err": str(exc)[:200],
                         }
-                    self._set(message=f"Backfill {tf} falhou: {exc}")
+                    self._set(message=f"Sync {tf} falhou: {exc}")
 
             # Fecha apos backfill; reconecta a cada ciclo horario.
             self._close_client(client)
@@ -342,7 +418,7 @@ class OhlcCollector:
                 try:
                     self._set(
                         phase="fetch",
-                        message=f"Buscando 1h ({asset})…",
+                        message=f"Buscando 1h novos ({asset})…",
                         next_fetch_at=None,
                     )
                     client = self._connect()
@@ -351,9 +427,11 @@ class OhlcCollector:
                             break
                         try:
                             n = self._upsert_tf(
-                                client, asset, tf, LIVE_OFFSET[tf]
+                                client, asset, tf, backfill=False
                             )
-                            self._set(message=f"Fetch {tf}: {n} velas")
+                            self._set(
+                                message=f"Fetch {tf}: {n} velas (desde ultimo salvo)"
+                            )
                         except Exception as exc:  # noqa: BLE001
                             with self._lock:
                                 cur = self._snap["per_tf"].get(tf, {})
@@ -370,7 +448,7 @@ class OhlcCollector:
                                 time.sleep(3.0)
                                 client = self._connect()
                                 self._upsert_tf(
-                                    client, asset, tf, LIVE_OFFSET[tf]
+                                    client, asset, tf, backfill=False
                                 )
                 except Exception as exc:  # noqa: BLE001
                     self._set(message=f"Ciclo falhou: {exc}")
@@ -387,6 +465,7 @@ class OhlcCollector:
         finally:
             self._close_client(client)
             with self._lock:
+                self._refresh_stored()
                 if not self._stop.is_set() and self._snap.get("phase") != "error":
                     self._snap["phase"] = "idle"
                     self._snap["message"] = "Parado"
