@@ -12,7 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bot.ohlc_collector import collector
-from bot.runner import MIN_DURATION, runner
+from bot.ohlc_store import fetch_candles
+from bot.runner import MIN_DURATION, normalize_asset, runner
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -147,3 +148,26 @@ def ohlc_start(
 @app.post("/api/ohlc/stop")
 def ohlc_stop(_: None = Depends(require_token)) -> dict:
     return collector.stop()
+
+
+@app.get("/api/ohlc/candles")
+def ohlc_candles(
+    asset: str | None = None,
+    timeframe: str = "1h",
+    limit: int = 200,
+    _: None = Depends(require_token),
+) -> dict:
+    """Candles salvos no Supabase (para o grafico da ferramenta)."""
+    if timeframe != "1h":
+        raise HTTPException(status_code=400, detail="Timeframe suportado: 1h")
+    a = normalize_asset(asset or collector.status().get("asset") or "EURUSD_otc")
+    try:
+        rows = fetch_candles(a, timeframe=timeframe, limit=limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "asset": a,
+        "timeframe": timeframe,
+        "count": len(rows),
+        "candles": rows,
+    }
