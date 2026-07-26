@@ -50,15 +50,32 @@
         gap: 0.45rem;
         margin: 0.35rem 0 0.15rem;
       }
-      .chart-modes .btn-mode {
+      .chart-modes .btn-mode,
+      .pnf-opts .btn-mode {
         font-size: 0.82rem;
         padding: 0.35rem 0.7rem;
         opacity: 0.72;
       }
-      .chart-modes .btn-mode.active {
+      .chart-modes .btn-mode.active,
+      .pnf-opts .btn-mode.active {
         opacity: 1;
         outline: 1px solid rgba(34, 211, 238, 0.55);
         background: rgba(34, 211, 238, 0.12);
+      }
+      .pnf-opts {
+        display: none;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .pnf-opts.visible {
+        display: flex;
+      }
+      .pnf-opts .pnf-opts-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-right: 0.15rem;
       }
     </style>
   </head>
@@ -137,6 +154,11 @@
               <button type="button" class="btn btn-mode" data-mode="streak">Cruzamento</button>
               <button type="button" class="btn btn-mode" data-mode="pnf">Pontos (P)</button>
             </div>
+            <div id="pnf-opts" class="pnf-opts" role="group" aria-label="Fonte do P&F">
+              <span class="pnf-opts-label">Pontos com:</span>
+              <button type="button" class="btn btn-mode" data-pnf-src="hl">Máx/Mín</button>
+              <button type="button" class="btn btn-mode" data-pnf-src="close">Só fechamento</button>
+            </div>
             <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
               —
             </p>
@@ -191,6 +213,7 @@
       const pnfCanvas = document.getElementById("pnf-chart");
       const chartMeta = document.getElementById("chart-meta");
       const CHART_MODE_KEY = "iq_blitz_ohlc_chart_mode";
+      const PNF_SRC_KEY = "iq_blitz_ohlc_pnf_src";
       const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
       // 1 ponto = 0.00001 (5 casas). Caixa = 100 pontos. Reversão clássica = 3 caixas.
       const PNF_POINT = 0.00001;
@@ -203,15 +226,22 @@
       let zeroLine = null;
       let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
       if (!CHART_MODES.includes(chartMode)) chartMode = "ohlc";
+      let pnfSource = localStorage.getItem(PNF_SRC_KEY) || "hl";
+      if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
       let lastMetaText = "";
       let pnfColumns = [];
+      const pnfOptsEl = document.getElementById("pnf-opts");
 
       function syncModeButtons() {
         document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
           btn.classList.toggle("active", btn.dataset.mode === chartMode);
+        });
+        pnfOptsEl.classList.toggle("visible", chartMode === "pnf");
+        pnfOptsEl.querySelectorAll("[data-pnf-src]").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.pnfSrc === pnfSource);
         });
       }
       syncModeButtons();
@@ -365,7 +395,7 @@
       }
 
       /** Ponto & Figura a partir de OHLC (high-low; aproximação sem ticks). */
-      function buildPnFColumns(candles, boxSize, reversal) {
+      function buildPnFColumnsHL(candles, boxSize, reversal) {
         const cols = [];
         let dir = 0;
         let top = 0;
@@ -423,6 +453,66 @@
           }
         }
         return cols.filter((col) => col.high >= col.low);
+      }
+
+      /** Ponto & Figura só com fechamentos (close-only). */
+      function buildPnFColumnsClose(candles, boxSize, reversal) {
+        const cols = [];
+        let dir = 0;
+        let top = 0;
+        let bot = 0;
+        let seed = null;
+        const toBox = (price) => Math.floor(price / boxSize + 1e-12);
+
+        for (const c of candles) {
+          const box = toBox(c.close);
+
+          if (dir === 0) {
+            if (seed == null) {
+              seed = box;
+              continue;
+            }
+            if (box > seed) {
+              cols.push({ dir: 1, low: seed + 1, high: box });
+              dir = 1;
+              top = box;
+              bot = seed + 1;
+            } else if (box < seed) {
+              cols.push({ dir: -1, low: box, high: seed - 1 });
+              dir = -1;
+              top = seed - 1;
+              bot = box;
+            }
+            continue;
+          }
+
+          if (dir === 1) {
+            if (box > top) {
+              top = box;
+              cols[cols.length - 1].high = top;
+            } else if (box <= top - reversal) {
+              cols.push({ dir: -1, low: box, high: top - 1 });
+              dir = -1;
+              top = top - 1;
+              bot = box;
+            }
+          } else if (box < bot) {
+            bot = box;
+            cols[cols.length - 1].low = bot;
+          } else if (box >= bot + reversal) {
+            cols.push({ dir: 1, low: bot + 1, high: box });
+            dir = 1;
+            bot = bot + 1;
+            top = box;
+          }
+        }
+        return cols.filter((col) => col.high >= col.low);
+      }
+
+      function buildPnFColumns(candles, boxSize, reversal) {
+        return pnfSource === "close"
+          ? buildPnFColumnsClose(candles, boxSize, reversal)
+          : buildPnFColumnsHL(candles, boxSize, reversal);
       }
 
       function drawPnF() {
@@ -524,7 +614,7 @@
         ctx.textAlign = "left";
         ctx.textBaseline = "top";
         ctx.fillText(
-          `P&F · caixa ${PNF_BOX_POINTS} pts (${PNF_BOX}) · rev ${PNF_REVERSAL} · eixo X = colunas (não tempo)`,
+          `P&F · ${pnfSource === "close" ? "só fechamento" : "máx/mín"} · caixa ${PNF_BOX_POINTS} pts (${PNF_BOX}) · rev ${PNF_REVERSAL} · eixo X = colunas`,
           padL,
           8
         );
@@ -561,7 +651,9 @@
           const base = lastMetaText || "";
           chartMeta.textContent =
             base +
-            ` · P&F ${pnfColumns.length} colunas · caixa ${PNF_BOX_POINTS} pts · rev ${PNF_REVERSAL}`;
+            ` · P&F ${pnfColumns.length} colunas · ${
+              pnfSource === "close" ? "só fechamento" : "máx/mín"
+            } · caixa ${PNF_BOX_POINTS} pts · rev ${PNF_REVERSAL}`;
           return;
         }
 
@@ -625,6 +717,14 @@
         localStorage.setItem(CHART_MODE_KEY, mode);
         syncModeButtons();
         applyChartData();
+      }
+
+      function setPnFSource(src) {
+        if (!["hl", "close"].includes(src)) return;
+        pnfSource = src;
+        localStorage.setItem(PNF_SRC_KEY, src);
+        syncModeButtons();
+        if (chartMode === "pnf") applyChartData();
       }
 
       function toChartTime(iso) {
@@ -848,6 +948,12 @@
       document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
         btn.addEventListener("click", () => {
           setChartMode(btn.dataset.mode);
+        });
+      });
+
+      pnfOptsEl.querySelectorAll("[data-pnf-src]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          setPnFSource(btn.dataset.pnfSrc);
         });
       });
 
