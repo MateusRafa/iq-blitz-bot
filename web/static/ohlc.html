@@ -33,6 +33,22 @@
         padding: 1rem;
         text-align: center;
       }
+      .chart-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .chart-modes .btn-mode {
+        font-size: 0.82rem;
+        padding: 0.35rem 0.7rem;
+        opacity: 0.72;
+      }
+      .chart-modes .btn-mode.active {
+        opacity: 1;
+        outline: 1px solid rgba(34, 211, 238, 0.55);
+        background: rgba(34, 211, 238, 0.12);
+      }
     </style>
   </head>
   <body>
@@ -102,13 +118,13 @@
           </div>
 
           <div class="panel">
-            <h2>Timeframe 1h</h2>
-            <div class="status-grid" id="tf-grid"></div>
-          </div>
-
-          <div class="panel">
             <h2>Gráfico (dados do Supabase)</h2>
-            <p class="message" style="margin-top:0;margin-bottom:0.5rem" id="chart-meta">
+            <div class="chart-modes" role="group" aria-label="Tipo de gráfico">
+              <button type="button" class="btn btn-mode active" data-mode="ohlc">Candles</button>
+              <button type="button" class="btn btn-mode" data-mode="signed">Força vs 0</button>
+              <button type="button" class="btn btn-mode" data-mode="cum">Tipo acum.</button>
+            </div>
+            <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
               —
             </p>
             <div class="chart-wrap">
@@ -121,7 +137,6 @@
 
     <script>
       const TOKEN_KEY = "iq_blitz_control_token";
-      const TFS = ["1h"];
 
       function getToken() {
         return localStorage.getItem(TOKEN_KEY) || "";
@@ -158,27 +173,46 @@
       const btnStart = document.getElementById("btn-start");
       const btnStop = document.getElementById("btn-stop");
       const assetInput = document.getElementById("asset-input");
-      const tfGrid = document.getElementById("tf-grid");
       const chartEl = document.getElementById("ohlc-chart");
       const chartMeta = document.getElementById("chart-meta");
+      const CHART_MODE_KEY = "iq_blitz_ohlc_chart_mode";
 
       let chart = null;
-      let candleSeries = null;
+      let activeSeries = null;
+      let zeroLine = null;
+      let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
+      if (!["ohlc", "signed", "cum"].includes(chartMode)) chartMode = "ohlc";
+      let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
+      let lastMetaText = "";
 
-      for (const tf of TFS) {
-        const div = document.createElement("div");
-        div.className = "status-item";
-        div.innerHTML = `<span class="label">${tf}</span><span class="value" id="tf-${tf}">—</span>`;
-        tfGrid.appendChild(div);
+      function syncModeButtons() {
+        document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.mode === chartMode);
+        });
       }
+      syncModeButtons();
 
       function resizeChart() {
         if (!chart || !chartEl) return;
         const w = Math.max(chartEl.clientWidth || chartEl.parentElement?.clientWidth || 0, 100);
         const h = Math.max(chartEl.clientHeight || 420, 280);
         chart.applyOptions({ width: w, height: h });
+      }
+
+      function clearSeries() {
+        if (!chart) return;
+        if (activeSeries) {
+          try {
+            if (zeroLine && typeof activeSeries.removePriceLine === "function") {
+              activeSeries.removePriceLine(zeroLine);
+            }
+          } catch (_) {}
+          chart.removeSeries(activeSeries);
+          activeSeries = null;
+          zeroLine = null;
+        }
       }
 
       function ensureChart() {
@@ -204,23 +238,138 @@
           width: w,
           height: h,
         });
-        candleSeries = chart.addCandlestickSeries({
-          upColor: "#22d3ee",
-          downColor: "#f43f5e",
-          borderUpColor: "#22d3ee",
-          borderDownColor: "#f43f5e",
-          wickUpColor: "#22d3ee",
-          wickDownColor: "#f43f5e",
-          priceFormat: {
-            type: "price",
-            precision: 5,
-            minMove: 0.00001,
-          },
-        });
         window.addEventListener("resize", resizeChart);
         if (typeof ResizeObserver !== "undefined") {
           new ResizeObserver(() => resizeChart()).observe(chartEl);
         }
+      }
+
+      function attachZeroLine(series) {
+        zeroLine = series.createPriceLine({
+          price: 0,
+          color: "rgba(148, 163, 184, 0.85)",
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "0",
+        });
+      }
+
+      function buildOhlcData(candles) {
+        return candles.map((c) => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+      }
+
+      /** Corpo/pavios relativos ao open = 0 (positivos acima, negativos abaixo). */
+      function buildSignedData(candles) {
+        return candles.map((c) => {
+          const body = c.close - c.open;
+          const hi = c.high - c.open;
+          const lo = c.low - c.open;
+          return {
+            time: c.time,
+            open: 0,
+            close: body,
+            high: Math.max(0, body, hi),
+            low: Math.min(0, body, lo),
+          };
+        });
+      }
+
+      /** Acumulado: +1 bullish, -1 bearish (doji não altera). */
+      function buildCumData(candles) {
+        let score = 0;
+        const points = [];
+        const markers = [];
+        for (const c of candles) {
+          if (c.close > c.open) score += 1;
+          else if (c.close < c.open) score -= 1;
+          points.push({ time: c.time, value: score });
+          markers.push({
+            time: c.time,
+            position: "inBar",
+            color: score > 0 ? "#22d3ee" : score < 0 ? "#f43f5e" : "#94a3b8",
+            shape: "circle",
+            size: 1,
+          });
+        }
+        return { points, markers };
+      }
+
+      function applyChartData() {
+        ensureChart();
+        if (!chart) {
+          chartMeta.textContent = "Biblioteca de gráfico indisponível.";
+          return;
+        }
+        clearSeries();
+        if (!rawCandles.length) {
+          chartMeta.textContent =
+            lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
+          return;
+        }
+
+        if (chartMode === "ohlc") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          activeSeries.setData(buildOhlcData(rawCandles));
+        } else if (chartMode === "signed") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          activeSeries.setData(buildSignedData(rawCandles));
+          attachZeroLine(activeSeries);
+        } else {
+          activeSeries = chart.addLineSeries({
+            color: "#94a3b8",
+            lineWidth: 2,
+            priceFormat: { type: "price", precision: 0, minMove: 1 },
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+          const { points, markers } = buildCumData(rawCandles);
+          activeSeries.setData(points);
+          activeSeries.setMarkers(markers);
+          attachZeroLine(activeSeries);
+        }
+
+        resizeChart();
+        chart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        });
+        setTimeout(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        }, 50);
+        if (lastMetaText) chartMeta.textContent = lastMetaText;
+      }
+
+      function setChartMode(mode) {
+        if (!["ohlc", "signed", "cum"].includes(mode)) return;
+        chartMode = mode;
+        localStorage.setItem(CHART_MODE_KEY, mode);
+        syncModeButtons();
+        applyChartData();
       }
 
       function toChartTime(iso) {
@@ -229,9 +378,33 @@
         return Math.floor(ms / 1000);
       }
 
+      function rowsToCandles(rows) {
+        const series = [];
+        let prevT = null;
+        for (const r of rows) {
+          const t = toChartTime(r.opened_at);
+          if (t == null) continue;
+          if (prevT != null && t <= prevT) continue;
+          const o = Number(r.open);
+          const h = Number(r.high);
+          const l = Number(r.low);
+          const c = Number(r.close);
+          if (![o, h, l, c].every(Number.isFinite)) continue;
+          series.push({
+            time: t,
+            open: o,
+            high: Math.max(h, o, c),
+            low: Math.min(l, o, c),
+            close: c,
+          });
+          prevT = t;
+        }
+        return series;
+      }
+
       async function loadChart(asset, force) {
         ensureChart();
-        if (!candleSeries) {
+        if (!chart) {
           chartMeta.textContent = "Biblioteca de gráfico indisponível.";
           return;
         }
@@ -254,52 +427,23 @@
           lastChartAsset = data.asset || "";
           lastChartCount = rows.length;
           if (!rows.length) {
-            candleSeries.setData([]);
-            chartMeta.textContent =
+            rawCandles = [];
+            lastMetaText =
               "Nenhum candle no Supabase para " +
               (data.asset || asset || "—") +
               ". Inicie o coletor para gravar.";
+            applyChartData();
             return;
           }
-          const series = [];
-          let prevT = null;
-          for (const r of rows) {
-            const t = toChartTime(r.opened_at);
-            if (t == null) continue;
-            // Lightweight Charts exige tempos estritamente crescentes.
-            if (prevT != null && t <= prevT) continue;
-            const o = Number(r.open);
-            const h = Number(r.high);
-            const l = Number(r.low);
-            const c = Number(r.close);
-            if (![o, h, l, c].every(Number.isFinite)) continue;
-            series.push({
-              time: t,
-              open: o,
-              high: Math.max(h, o, c),
-              low: Math.min(l, o, c),
-              close: c,
-            });
-            prevT = t;
-          }
-          if (!series.length) {
-            chartMeta.textContent = "Dados OHLC inválidos para o gráfico.";
+          rawCandles = rowsToCandles(rows);
+          if (!rawCandles.length) {
+            lastMetaText = "Dados OHLC inválidos para o gráfico.";
+            applyChartData();
             return;
           }
-          resizeChart();
-          candleSeries.setData(series);
-          chart.timeScale().fitContent();
-          requestAnimationFrame(() => {
-            resizeChart();
-            chart.timeScale().fitContent();
-          });
-          setTimeout(() => {
-            resizeChart();
-            chart.timeScale().fitContent();
-          }, 50);
           const first = rows[0].opened_at;
           const last = rows[rows.length - 1].opened_at;
-          chartMeta.textContent =
+          lastMetaText =
             data.asset +
             " · 1h · " +
             rows.length +
@@ -308,6 +452,7 @@
             " → " +
             String(last).replace("T", " ").slice(0, 16) +
             " UTC";
+          applyChartData();
         } catch (e) {
           chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
         }
@@ -379,17 +524,6 @@
           ? String(st.updated_at).replace("T", " ").slice(0, 19)
           : "—";
         document.getElementById("s-msg").textContent = st.message || st.error || "";
-        const per = st.per_tf || {};
-        for (const tf of TFS) {
-          const el = document.getElementById("tf-" + tf);
-          if (!el) continue;
-          const row = per[tf] || {};
-          if (row.err) {
-            el.textContent = "erro: " + row.err;
-          } else {
-            el.textContent = (row.ok != null ? row.ok : 0) + " upserts sessão";
-          }
-        }
       }
 
       async function refresh() {
@@ -454,6 +588,12 @@
         } catch (e) {
           setCmdErro(e.message || String(e));
         }
+      });
+
+      document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          setChartMode(btn.dataset.mode);
+        });
       });
 
       (async () => {
