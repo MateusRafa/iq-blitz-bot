@@ -23,6 +23,17 @@
         height: 100%;
         min-height: 320px;
       }
+      #pnf-chart {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: none;
+        cursor: crosshair;
+      }
+      #pnf-chart.visible {
+        display: block;
+      }
       .chart-empty {
         display: flex;
         align-items: center;
@@ -124,12 +135,14 @@
               <button type="button" class="btn btn-mode" data-mode="signed">Força vs 0</button>
               <button type="button" class="btn btn-mode" data-mode="cum">Tipo acum.</button>
               <button type="button" class="btn btn-mode" data-mode="streak">Cruzamento</button>
+              <button type="button" class="btn btn-mode" data-mode="pnf">Pontos (P)</button>
             </div>
             <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
               —
             </p>
             <div class="chart-wrap">
               <div id="ohlc-chart"></div>
+              <canvas id="pnf-chart" aria-label="Gráfico de Pontos"></canvas>
             </div>
           </div>
         </div>
@@ -175,18 +188,26 @@
       const btnStop = document.getElementById("btn-stop");
       const assetInput = document.getElementById("asset-input");
       const chartEl = document.getElementById("ohlc-chart");
+      const pnfCanvas = document.getElementById("pnf-chart");
       const chartMeta = document.getElementById("chart-meta");
       const CHART_MODE_KEY = "iq_blitz_ohlc_chart_mode";
+      const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
+      // 1 ponto = 0.00001 (5 casas). Caixa = 100 pontos. Reversão clássica = 3 caixas.
+      const PNF_POINT = 0.00001;
+      const PNF_BOX_POINTS = 100;
+      const PNF_BOX = PNF_BOX_POINTS * PNF_POINT;
+      const PNF_REVERSAL = 3;
 
       let chart = null;
       let activeSeries = null;
       let zeroLine = null;
       let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
-      if (!["ohlc", "signed", "cum", "streak"].includes(chartMode)) chartMode = "ohlc";
+      if (!CHART_MODES.includes(chartMode)) chartMode = "ohlc";
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
       let lastMetaText = "";
+      let pnfColumns = [];
 
       function syncModeButtons() {
         document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
@@ -195,7 +216,21 @@
       }
       syncModeButtons();
 
+      function setPnFVisible(on) {
+        if (on) {
+          pnfCanvas.classList.add("visible");
+          chartEl.style.visibility = "hidden";
+        } else {
+          pnfCanvas.classList.remove("visible");
+          chartEl.style.visibility = "visible";
+        }
+      }
+
       function resizeChart() {
+        if (chartMode === "pnf") {
+          drawPnF();
+          return;
+        }
         if (!chart || !chartEl) return;
         const w = Math.max(chartEl.clientWidth || chartEl.parentElement?.clientWidth || 0, 100);
         const h = Math.max(chartEl.clientHeight || 420, 280);
@@ -219,7 +254,7 @@
       function ensureChart() {
         if (typeof LightweightCharts === "undefined") return;
         if (chart) {
-          resizeChart();
+          if (chartMode !== "pnf") resizeChart();
           return;
         }
         const w = Math.max(chartEl.clientWidth || 600, 100);
@@ -241,7 +276,7 @@
         });
         window.addEventListener("resize", resizeChart);
         if (typeof ResizeObserver !== "undefined") {
-          new ResizeObserver(() => resizeChart()).observe(chartEl);
+          new ResizeObserver(() => resizeChart()).observe(chartEl.parentElement || chartEl);
         }
       }
 
@@ -317,7 +352,6 @@
           } else if (c.close < c.open) {
             score = score < 0 ? score - 1 : -1;
           }
-          // doji: mantém score
           points.push({ time: c.time, value: score });
           markers.push({
             time: c.time,
@@ -328,6 +362,172 @@
           });
         }
         return { points, markers };
+      }
+
+      /** Ponto & Figura a partir de OHLC (high-low; aproximação sem ticks). */
+      function buildPnFColumns(candles, boxSize, reversal) {
+        const cols = [];
+        let dir = 0;
+        let top = 0;
+        let bot = 0;
+
+        const toBox = (price) => Math.floor(price / boxSize + 1e-12);
+
+        for (const c of candles) {
+          const hi = toBox(c.high);
+          const lo = toBox(c.low);
+          if (hi < lo) continue;
+
+          if (dir === 0) {
+            if (hi === lo) continue;
+            if (c.close >= c.open) {
+              cols.push({ dir: 1, low: lo, high: hi });
+              dir = 1;
+              top = hi;
+              bot = lo;
+            } else {
+              cols.push({ dir: -1, low: lo, high: hi });
+              dir = -1;
+              top = hi;
+              bot = lo;
+            }
+            continue;
+          }
+
+          if (dir === 1) {
+            if (hi > top) {
+              top = hi;
+              cols[cols.length - 1].high = top;
+            }
+            if (lo <= top - reversal) {
+              const newHigh = top - 1;
+              const newLow = lo;
+              cols.push({ dir: -1, low: newLow, high: newHigh });
+              dir = -1;
+              top = newHigh;
+              bot = newLow;
+            }
+          } else {
+            if (lo < bot) {
+              bot = lo;
+              cols[cols.length - 1].low = bot;
+            }
+            if (hi >= bot + reversal) {
+              const newLow = bot + 1;
+              const newHigh = hi;
+              cols.push({ dir: 1, low: newLow, high: newHigh });
+              dir = 1;
+              bot = newLow;
+              top = newHigh;
+            }
+          }
+        }
+        return cols.filter((col) => col.high >= col.low);
+      }
+
+      function drawPnF() {
+        const wrap = pnfCanvas.parentElement;
+        const cssW = Math.max(wrap?.clientWidth || 600, 100);
+        const cssH = Math.max(wrap?.clientHeight || 420, 280);
+        const dpr = window.devicePixelRatio || 1;
+        pnfCanvas.width = Math.floor(cssW * dpr);
+        pnfCanvas.height = Math.floor(cssH * dpr);
+        pnfCanvas.style.width = cssW + "px";
+        pnfCanvas.style.height = cssH + "px";
+        const ctx = pnfCanvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = "#0a1220";
+        ctx.fillRect(0, 0, cssW, cssH);
+
+        if (!pnfColumns.length) {
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = "14px sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("Sem colunas P&F (caixa grande demais para o range?)", cssW / 2, cssH / 2);
+          return;
+        }
+
+        let minBox = Infinity;
+        let maxBox = -Infinity;
+        for (const col of pnfColumns) {
+          minBox = Math.min(minBox, col.low);
+          maxBox = Math.max(maxBox, col.high);
+        }
+        // margem visual
+        minBox -= 1;
+        maxBox += 1;
+        const nRows = maxBox - minBox + 1;
+        const nCols = pnfColumns.length;
+        const padL = 12;
+        const padR = 72;
+        const padT = 28;
+        const padB = 28;
+        const plotW = cssW - padL - padR;
+        const plotH = cssH - padT - padB;
+        const cellW = Math.max(10, Math.min(28, plotW / Math.max(nCols, 1)));
+        const cellH = Math.max(10, Math.min(28, plotH / Math.max(nRows, 1)));
+        const gridW = cellW * nCols;
+        const gridH = cellH * nRows;
+        const originX = padL + Math.max(0, (plotW - gridW) / 2);
+        const originY = padT + Math.max(0, (plotH - gridH) / 2);
+
+        // grid
+        ctx.strokeStyle = "rgba(34,211,238,0.08)";
+        ctx.lineWidth = 1;
+        for (let r = 0; r <= nRows; r++) {
+          const y = originY + r * cellH;
+          ctx.beginPath();
+          ctx.moveTo(originX, y);
+          ctx.lineTo(originX + gridW, y);
+          ctx.stroke();
+        }
+        for (let c = 0; c <= nCols; c++) {
+          const x = originX + c * cellW;
+          ctx.beginPath();
+          ctx.moveTo(x, originY);
+          ctx.lineTo(x, originY + gridH);
+          ctx.stroke();
+        }
+
+        const fontSize = Math.max(9, Math.min(cellW, cellH) * 0.72);
+        ctx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        for (let ci = 0; ci < nCols; ci++) {
+          const col = pnfColumns[ci];
+          const sym = col.dir === 1 ? "X" : "O";
+          ctx.fillStyle = col.dir === 1 ? "#22d3ee" : "#f43f5e";
+          for (let b = col.low; b <= col.high; b++) {
+            const rowFromTop = maxBox - b;
+            const x = originX + ci * cellW + cellW / 2;
+            const y = originY + rowFromTop * cellH + cellH / 2;
+            ctx.fillText(sym, x, y);
+          }
+        }
+
+        // eixo de preço (direita)
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        const labelStep = Math.max(1, Math.ceil(nRows / 8));
+        for (let b = minBox; b <= maxBox; b += labelStep) {
+          const rowFromTop = maxBox - b;
+          const y = originY + rowFromTop * cellH + cellH / 2;
+          const price = (b * PNF_BOX).toFixed(5);
+          ctx.fillText(price, originX + gridW + 8, y);
+        }
+
+        ctx.fillStyle = "#64748b";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(
+          `P&F · caixa ${PNF_BOX_POINTS} pts (${PNF_BOX}) · rev ${PNF_REVERSAL} · eixo X = colunas (não tempo)`,
+          padL,
+          8
+        );
       }
 
       function applyLineMode(builder) {
@@ -346,6 +546,26 @@
 
       function applyChartData() {
         ensureChart();
+        if (chartMode === "pnf") {
+          setPnFVisible(true);
+          clearSeries();
+          if (!rawCandles.length) {
+            pnfColumns = [];
+            chartMeta.textContent =
+              lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
+            drawPnF();
+            return;
+          }
+          pnfColumns = buildPnFColumns(rawCandles, PNF_BOX, PNF_REVERSAL);
+          drawPnF();
+          const base = lastMetaText || "";
+          chartMeta.textContent =
+            base +
+            ` · P&F ${pnfColumns.length} colunas · caixa ${PNF_BOX_POINTS} pts · rev ${PNF_REVERSAL}`;
+          return;
+        }
+
+        setPnFVisible(false);
         if (!chart) {
           chartMeta.textContent = "Biblioteca de gráfico indisponível.";
           return;
@@ -400,7 +620,7 @@
       }
 
       function setChartMode(mode) {
-        if (!["ohlc", "signed", "cum", "streak"].includes(mode)) return;
+        if (!CHART_MODES.includes(mode)) return;
         chartMode = mode;
         localStorage.setItem(CHART_MODE_KEY, mode);
         syncModeButtons();
