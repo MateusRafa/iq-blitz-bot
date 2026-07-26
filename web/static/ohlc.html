@@ -9,16 +9,19 @@
     <style>
       .chart-wrap {
         width: 100%;
-        height: min(420px, 55vh);
+        height: 420px;
+        min-height: 320px;
         margin-top: 0.75rem;
         border-radius: 10px;
         overflow: hidden;
         border: 1px solid rgba(34, 211, 238, 0.25);
         background: #0a1220;
+        position: relative;
       }
       #ohlc-chart {
         width: 100%;
         height: 100%;
+        min-height: 320px;
       }
       .chart-empty {
         display: flex;
@@ -171,9 +174,23 @@
         tfGrid.appendChild(div);
       }
 
+      function resizeChart() {
+        if (!chart || !chartEl) return;
+        const w = Math.max(chartEl.clientWidth || chartEl.parentElement?.clientWidth || 0, 100);
+        const h = Math.max(chartEl.clientHeight || 420, 280);
+        chart.applyOptions({ width: w, height: h });
+      }
+
       function ensureChart() {
-        if (chart || typeof LightweightCharts === "undefined") return;
+        if (typeof LightweightCharts === "undefined") return;
+        if (chart) {
+          resizeChart();
+          return;
+        }
+        const w = Math.max(chartEl.clientWidth || 600, 100);
+        const h = Math.max(chartEl.clientHeight || 420, 280);
         chart = LightweightCharts.createChart(chartEl, {
+          autoSize: false,
           layout: {
             background: { color: "#0a1220" },
             textColor: "#94a3b8",
@@ -184,8 +201,8 @@
           },
           rightPriceScale: { borderColor: "rgba(34,211,238,0.25)" },
           timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
-          width: chartEl.clientWidth,
-          height: chartEl.clientHeight,
+          width: w,
+          height: h,
         });
         candleSeries = chart.addCandlestickSeries({
           upColor: "#22d3ee",
@@ -200,13 +217,10 @@
             minMove: 0.00001,
           },
         });
-        window.addEventListener("resize", () => {
-          if (!chart) return;
-          chart.applyOptions({
-            width: chartEl.clientWidth,
-            height: chartEl.clientHeight,
-          });
-        });
+        window.addEventListener("resize", resizeChart);
+        if (typeof ResizeObserver !== "undefined") {
+          new ResizeObserver(() => resizeChart()).observe(chartEl);
+        }
       }
 
       function toChartTime(iso) {
@@ -234,6 +248,7 @@
             data.asset === lastChartAsset &&
             rows.length === lastChartCount
           ) {
+            resizeChart();
             return;
           }
           lastChartAsset = data.asset || "";
@@ -247,19 +262,41 @@
             return;
           }
           const series = [];
+          let prevT = null;
           for (const r of rows) {
             const t = toChartTime(r.opened_at);
             if (t == null) continue;
+            // Lightweight Charts exige tempos estritamente crescentes.
+            if (prevT != null && t <= prevT) continue;
+            const o = Number(r.open);
+            const h = Number(r.high);
+            const l = Number(r.low);
+            const c = Number(r.close);
+            if (![o, h, l, c].every(Number.isFinite)) continue;
             series.push({
               time: t,
-              open: Number(r.open),
-              high: Number(r.high),
-              low: Number(r.low),
-              close: Number(r.close),
+              open: o,
+              high: Math.max(h, o, c),
+              low: Math.min(l, o, c),
+              close: c,
             });
+            prevT = t;
           }
+          if (!series.length) {
+            chartMeta.textContent = "Dados OHLC inválidos para o gráfico.";
+            return;
+          }
+          resizeChart();
           candleSeries.setData(series);
           chart.timeScale().fitContent();
+          requestAnimationFrame(() => {
+            resizeChart();
+            chart.timeScale().fitContent();
+          });
+          setTimeout(() => {
+            resizeChart();
+            chart.timeScale().fitContent();
+          }, 50);
           const first = rows[0].opened_at;
           const last = rows[rows.length - 1].opened_at;
           chartMeta.textContent =
@@ -365,8 +402,9 @@
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
         try {
-          await refresh();
+          // Mostrar o painel antes do gráfico (senão clientWidth/Height = 0).
           showApp();
+          await refresh();
           setCmdErro("");
         } catch (e) {
           showAuth(e.message || String(e));
@@ -426,8 +464,9 @@
           return;
         }
         try {
-          await refresh();
+          // Painel visível antes de criar o chart (evita canvas 0×0).
           showApp();
+          await refresh();
         } catch (e) {
           showAuth(e.message || String(e));
         }
