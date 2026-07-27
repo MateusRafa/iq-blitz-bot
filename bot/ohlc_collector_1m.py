@@ -44,6 +44,51 @@ LIVE_OFFSET: dict[str, int] = {
 }
 
 
+def _parse_row_opened(row: dict[str, Any]) -> datetime | None:
+    raw = row.get("opened_at")
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def filter_closed_candles(
+    rows: list[dict[str, Any]],
+    period: int,
+    *,
+    grace_seconds: int | None = None,
+) -> list[dict[str, Any]]:
+    """Mantem so velas ja fechadas (evita gravar o minuto em formacao).
+
+    A vela que abriu em T fecha em T+period. So persiste se
+    now >= T + period + grace (Pocket costuma fechar OHLC alguns segundos depois).
+    """
+    if not rows:
+        return []
+    grace = (
+        grace_seconds
+        if grace_seconds is not None
+        else _env_int("OHLC_1M_CLOSE_GRACE_SECONDS", 8)
+    )
+    if not _env_flag_default_on("OHLC_1M_CLOSED_ONLY", "1"):
+        return rows
+    now = datetime.now(timezone.utc)
+    keep: list[dict[str, Any]] = []
+    for row in rows:
+        ts = _parse_row_opened(row)
+        if ts is None:
+            continue
+        closed_at = ts + timedelta(seconds=period + max(grace, 0))
+        if now >= closed_at:
+            keep.append(row)
+    return keep
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -247,11 +292,13 @@ class OhlcCollector1m:
                     ts = ts.replace(tzinfo=timezone.utc)
                 if ts >= cutoff:
                     keep.append(row)
+            keep = filter_closed_candles(keep, TIMEFRAMES["1m"])
             if keep:
                 keep = merge_ohlc_with_existing(
                     keep, asset=asset, timeframe="1m", table=TABLE_1M
                 )
                 upserted = upsert_candles(keep, table=TABLE_1M) if keep else 0
+            self._purge_forming_candle(asset, "1m")
             with self._lock:
                 self._snap["last_upsert"] = upserted
                 self._snap["total_upserted"] = int(
@@ -366,6 +413,8 @@ class OhlcCollector1m:
                 if ts >= cutoff:
                     filtered.append(row)
             rows = filtered
+        # Nao grava a vela do minuto atual (OHLC incompleto = tracos / pavios errados).
+        rows = filter_closed_candles(rows, period)
         if not rows:
             return 0
         rows = merge_ohlc_with_existing(
@@ -374,6 +423,7 @@ class OhlcCollector1m:
         if not rows:
             return 0
         n = upsert_candles(rows, table=TABLE_1M)
+        self._purge_forming_candle(asset, tf)
         with self._lock:
             prev = int(self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0)
             self._snap["per_tf"][tf] = {"ok": prev + n, "err": None}
@@ -383,6 +433,18 @@ class OhlcCollector1m:
             ) + n
             self._refresh_stored()
         return n
+
+    def _purge_forming_candle(self, asset: str, tf: str) -> None:
+        """Remove do DB o minuto ainda aberto (lixo de ticks incompletos)."""
+        if not _env_flag_default_on("OHLC_1M_CLOSED_ONLY", "1"):
+            return
+        now_min = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        try:
+            delete_candles_since(
+                asset, now_min, timeframe=tf, table=TABLE_1M
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _trailing_flats_need_repair(self, asset: str) -> bool:
         """True se >=2 velas ja fechadas no fim estao flat (O=H=L=C)."""
@@ -485,10 +547,12 @@ class OhlcCollector1m:
                     ts = ts.replace(tzinfo=timezone.utc)
                 if ts >= cutoff:
                     keep.append(row)
+            keep = filter_closed_candles(keep, period)
             keep = merge_ohlc_with_existing(
                 keep, asset=asset, timeframe="1m", table=TABLE_1M
             )
             n = upsert_candles(keep, table=TABLE_1M) if keep else 0
+            self._purge_forming_candle(asset, "1m")
             with self._lock:
                 self._snap["last_flat_repair_at"] = datetime.now(
                     timezone.utc
@@ -592,11 +656,13 @@ class OhlcCollector1m:
                     ts = ts.replace(tzinfo=timezone.utc)
                 if ts >= cutoff:
                     keep.append(row)
+            keep = filter_closed_candles(keep, period)
             if keep:
                 keep = merge_ohlc_with_existing(
                     keep, asset=asset, timeframe="1m", table=TABLE_1M
                 )
                 n = upsert_candles(keep, table=TABLE_1M) if keep else 0
+                self._purge_forming_candle(asset, "1m")
                 self._set(message=f"Buraco 1m reparado: {n} velas upsert")
                 with self._lock:
                     self._refresh_stored()
@@ -642,20 +708,17 @@ class OhlcCollector1m:
             time.sleep(min(left, 1.0))
 
     def _wait_for_next_cycle(self) -> None:
-        # Padrao: poll a cada 30s (grafico atualiza mais rapido).
-        # OHLC_1M_ALIGN_MINUTE=1 volta ao alinhamento por minuto UTC.
-        align = os.environ.get("OHLC_1M_ALIGN_MINUTE", "0").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "",
-        )
-        after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 5)
+        # Padrao: 1 fetch por minuto UTC, ~8s apos o fechamento da vela.
+        # (Poll a cada 30s no meio do minuto gravava OHLC incompleto = bug na ponta.)
+        # OHLC_1M_ALIGN_MINUTE=0 volta ao poll por intervalo (OHLC_1M_POLL_SECONDS).
+        align_raw = os.environ.get("OHLC_1M_ALIGN_MINUTE", "1").strip().lower()
+        align = align_raw not in ("0", "false", "no")
+        after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 8)
         if align:
             wait = seconds_until_next_minute_fetch(after_minute_seconds=after)
             mode = "minutely"
         else:
-            wait = float(max(_env_int("OHLC_1M_POLL_SECONDS", 30), 15))
+            wait = float(max(_env_int("OHLC_1M_POLL_SECONDS", 60), 30))
             mode = "poll"
         next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
         self._set(
@@ -664,7 +727,7 @@ class OhlcCollector1m:
             next_fetch_at=next_at.isoformat(),
             message=(
                 f"Proximo fetch 1m em ~{int(wait)}s "
-                f"({next_at.strftime('%H:%M:%S')} UTC)"
+                f"({next_at.strftime('%H:%M:%S')} UTC, so velas fechadas)"
             ),
         )
         self._sleep_interruptible(wait)
