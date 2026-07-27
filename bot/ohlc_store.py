@@ -110,6 +110,63 @@ def _is_flat_ohlc(o: float, h: float, lo: float, c: float) -> bool:
     return max(h, o, c) - min(lo, o, c) <= 1e-12
 
 
+def sanitize_ohlc_spikes(
+    rows: list[dict[str, Any]],
+    *,
+    max_range_mult: float = 6.0,
+    max_dev_frac: float = 0.004,
+) -> list[dict[str, Any]]:
+    """Limita pavios absurdos vs mediana do lote (forex OTC 1m).
+
+    Nao descarta a vela: clampa high/low ao redor de open/close.
+    Velas com close/open totalmente fora da banda do lote sao removidas.
+    """
+    if len(rows) < 8:
+        return rows
+    closes: list[float] = []
+    ranges: list[float] = []
+    parsed: list[tuple[dict[str, Any], float, float, float, float]] = []
+    for row in rows:
+        try:
+            o = float(row["open"])
+            h = float(row["high"])
+            lo = float(row["low"])
+            c = float(row["close"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        h = max(h, o, c)
+        lo = min(lo, o, c)
+        parsed.append((row, o, h, lo, c))
+        closes.append(c)
+        ranges.append(h - lo)
+    if len(parsed) < 8:
+        return rows
+    closes_sorted = sorted(closes)
+    mid = closes_sorted[len(closes_sorted) // 2]
+    if not (mid > 0):
+        return rows
+    ranges_sorted = sorted(ranges)
+    med_range = ranges_sorted[len(ranges_sorted) // 2]
+    band = max(med_range * max_range_mult, mid * 0.00025)  # >= ~2.5 pips
+    out: list[dict[str, Any]] = []
+    for row, o, h, lo, c in parsed:
+        if abs(c - mid) / mid > max_dev_frac and abs(o - mid) / mid > max_dev_frac:
+            continue
+        body_hi = max(o, c)
+        body_lo = min(o, c)
+        nh = min(h, body_hi + band)
+        nl = max(lo, body_lo - band)
+        nh = max(nh, body_hi)
+        nl = min(nl, body_lo)
+        cleaned = dict(row)
+        cleaned["open"] = o
+        cleaned["high"] = nh
+        cleaned["low"] = nl
+        cleaned["close"] = c
+        out.append(cleaned)
+    return out
+
+
 def merge_ohlc_with_existing(
     rows: list[dict[str, Any]],
     *,
