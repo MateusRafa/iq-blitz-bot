@@ -44,6 +44,10 @@ class OhlcStartBody(BaseModel):
     asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class OhlcResyncBody(BaseModel):
+    minutes: int = Field(default=20, ge=1, le=180)
+
+
 def _control_token() -> str:
     return os.environ.get("CONTROL_TOKEN", "").strip()
 
@@ -298,3 +302,17 @@ def ohlc1m_cleanup(_: None = Depends(require_token)) -> dict:
         return run_retention_cleanup_1m(a)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ohlc1m/resync-recent")
+def ohlc1m_resync_recent(
+    body: OhlcResyncBody = OhlcResyncBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Apaga os ultimos N minutos no Supabase e repuxa da Pocket (upsert)."""
+    try:
+        return collector_1m.resync_recent(body.minutes)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
