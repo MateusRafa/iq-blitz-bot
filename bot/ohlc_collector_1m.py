@@ -461,46 +461,58 @@ class OhlcCollector1m:
         # Mesmo offset da lib (Pocket platform time ≈ UTC+2).
         platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
         platform_time = int(time.time()) + platform_offset
-        groups: list[list[dict[str, Any]]] = []
 
-        try:
-            groups.append(
-                self._as_candle_list(
-                    client.get_candles_advanced(
-                        asset, period, offset, platform_time
+        def _pull_sources(off: int, ref_time: int) -> list[list[dict[str, Any]]]:
+            groups: list[list[dict[str, Any]]] = []
+            try:
+                groups.append(
+                    self._as_candle_list(
+                        client.get_candles_advanced(
+                            asset, period, off, ref_time
+                        )
                     )
                 )
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            groups.append(self._as_candle_list(client.history(asset, period)))
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            groups.append(
-                self._as_candle_list(
-                    client.compile_candles(asset, period, offset)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                groups.append(
+                    self._as_candle_list(client.history(asset, period))
                 )
-            )
-        except Exception:  # noqa: BLE001
-            pass
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                groups.append(
+                    self._as_candle_list(
+                        client.compile_candles(asset, period, off)
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return groups
 
-        # Fallback controlado: live com max_rows alto (ja vem com time ajustado).
+        groups = _pull_sources(offset, platform_time)
+
+        # Fallback: live com max_rows alto (time ja vem ajustado — sem offset).
+        live_adjusted = False
         if not any(groups):
-            hours = max(0.1, offset / 3600.0)
-            max_rows = min(max(offset // period + 20, 300), 5000)
+            hours = max(0.1, min(offset / 3600.0, 48.0))
+            max_rows = min(max(int(hours * 3600) // period + 20, 300), 5000)
             it = None
             try:
+                self._set(
+                    message=(
+                        f"Fallback live 1m (~{hours:.1f}h, max {max_rows})…"
+                    )
+                )
                 it = client.get_candles_live(
                     asset, period, hours=hours, max_rows=max_rows
                 )
                 closed, _forming = next(it)
                 groups.append(self._as_candle_list(closed))
+                live_adjusted = True
             except Exception:  # noqa: BLE001
                 pass
             finally:
-                # Encerra o generator para unsubscribe de ticks.
                 if it is not None:
                     try:
                         it.close()  # type: ignore[attr-defined]
@@ -509,27 +521,10 @@ class OhlcCollector1m:
 
         by_key: dict[str, dict[str, Any]] = {}
         for group in groups:
-            # advanced/history/compile: aplicar offset. live fallback: time ja corrigido.
-            # Heuristica: se o time bruto esta ~7200s a frente de agora, aplicar offset.
             for item in group:
-                ts_raw = None
-                for key in ("time", "timestamp", "t", "from", "open_time"):
-                    if key in item:
-                        try:
-                            ts_raw = int(float(item[key]))
-                            break
-                        except (TypeError, ValueError):
-                            continue
-                use_offset = platform_offset
-                if ts_raw is not None:
-                    if ts_raw > 10_000_000_000:
-                        ts_raw //= 1000
-                    now_u = int(time.time())
-                    # Se ja parece UTC (perto de agora), nao subtrai de novo.
-                    if abs(ts_raw - now_u) < 3600 * 6:
-                        use_offset = 0
-                    elif ts_raw - now_u > 1800:
-                        use_offset = platform_offset
+                # advanced/history/compile: SEMPRE subtrai offset da plataforma
+                # (igual BinaryOptionsToolsV2). Live fallback: ja vem em UTC.
+                use_offset = 0 if live_adjusted else platform_offset
                 norm = normalize_candle(
                     item,
                     asset=asset,
@@ -542,13 +537,143 @@ class OhlcCollector1m:
                 prev = by_key.get(key)
                 if prev is None:
                     by_key[key] = norm
-                    continue
-                # Varias fontes no mesmo minuto: NAO sobrescrever um corpo bom
-                # com um "traco" (O=C) de outra fonte — era o bug vs Pocket.
-                by_key[key] = _prefer_better_candle(prev, norm)
+                else:
+                    by_key[key] = _prefer_better_candle(prev, norm)
         rows = list(by_key.values())
         rows.sort(key=lambda r: str(r.get("opened_at") or ""))
         return rows
+
+    def _backfill_chunked(
+        self, client: PocketOption, asset: str, tf: str
+    ) -> int:
+        """Backfill em fatias para nao travar e ja popular o grafico cedo.
+
+        1) Ultimas 6h (rapido)  2) Depois fatias de 12h ate ~7 dias.
+        """
+        period = TIMEFRAMES[tf]
+        total = 0
+        # Fase rapida: 6 horas.
+        quick = 6 * 3600
+        self._set(message="Backfill 1m: buscando ultimas 6h…")
+        try:
+            n = self._upsert_tf_with_offset(
+                client, asset, tf, offset=quick, backfill=True
+            )
+            total += n
+            self._set(message=f"Backfill 1m: +{n} velas (6h). Total {total}")
+        except Exception as exc:  # noqa: BLE001
+            self._set(message=f"Backfill 6h falhou: {exc}")
+
+        # Historico: ate 7 dias em fatias de 12h (do passado para o presente).
+        full = BACKFILL_OFFSET[tf]
+        chunk = 12 * 3600
+        # ref_time anda para tras; cada fatia pede `chunk` segundos.
+        platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
+        steps = max(1, (full + chunk - 1) // chunk)
+        for i in range(steps):
+            if self._stop.is_set():
+                break
+            # Quanto tempo atras termina esta fatia.
+            end_ago = i * chunk
+            ref_unix = int(time.time()) - end_ago
+            ref_platform = ref_unix + platform_offset
+            self._set(
+                message=(
+                    f"Backfill 1m: fatia {i + 1}/{steps} "
+                    f"(~{chunk // 3600}h, ref −{end_ago // 3600}h)…"
+                )
+            )
+            try:
+                raw = self._as_candle_list(
+                    client.get_candles_advanced(
+                        asset, period, chunk, ref_platform
+                    )
+                )
+                rows: list[dict[str, Any]] = []
+                for item in raw:
+                    norm = normalize_candle(
+                        item,
+                        asset=asset,
+                        timeframe=tf,
+                        time_offset=platform_offset,
+                    )
+                    if norm:
+                        rows.append(norm)
+                # Dedup por minuto preferindo corpo.
+                by_key: dict[str, dict[str, Any]] = {}
+                for row in rows:
+                    k = str(row["opened_at"])
+                    prev = by_key.get(k)
+                    by_key[k] = (
+                        row
+                        if prev is None
+                        else _prefer_better_candle(prev, row)
+                    )
+                rows = list(by_key.values())
+                rows = filter_closed_candles(rows, period)
+                rows = sanitize_ohlc_spikes(rows)
+                rows = self._reconcile_prefer_body(rows, asset, tf)
+                if rows:
+                    n = upsert_candles(rows, table=TABLE_1M)
+                    total += n
+                    with self._lock:
+                        prev_ok = int(
+                            self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0
+                        )
+                        self._snap["per_tf"][tf] = {
+                            "ok": prev_ok + n,
+                            "err": None,
+                        }
+                        self._snap["last_upsert"] = n
+                        self._snap["total_upserted"] = int(
+                            self._snap.get("total_upserted", 0) or 0
+                        ) + n
+                        self._refresh_stored()
+                    self._set(
+                        message=(
+                            f"Backfill 1m: fatia {i + 1}/{steps} → {n} velas "
+                            f"(total {total})"
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self._set(
+                    message=f"Backfill fatia {i + 1}/{steps} falhou: {exc}"
+                )
+        self._purge_forming_candle(asset, tf)
+        return total
+
+    def _upsert_tf_with_offset(
+        self,
+        client: PocketOption,
+        asset: str,
+        tf: str,
+        *,
+        offset: int,
+        backfill: bool,
+    ) -> int:
+        """Como _upsert_tf, mas com offset explicito (para backfill rapido)."""
+        rows = self._fetch_tf(client, asset, tf, offset)
+        if not rows:
+            return 0
+        period = TIMEFRAMES[tf]
+        rows = filter_closed_candles(rows, period)
+        if not rows:
+            return 0
+        rows = sanitize_ohlc_spikes(rows)
+        rows = self._reconcile_prefer_body(rows, asset, tf)
+        if not rows:
+            return 0
+        n = upsert_candles(rows, table=TABLE_1M)
+        self._purge_forming_candle(asset, tf)
+        with self._lock:
+            prev = int(self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0)
+            self._snap["per_tf"][tf] = {"ok": prev + n, "err": None}
+            self._snap["last_upsert"] = n
+            self._snap["total_upserted"] = int(
+                self._snap.get("total_upserted", 0) or 0
+            ) + n
+            self._refresh_stored()
+        return n
 
     def _upsert_tf(
         self,
@@ -969,8 +1094,23 @@ class OhlcCollector1m:
                 if self._stop.is_set():
                     break
                 try:
-                    n = self._upsert_tf(client, asset, tf, backfill=True)
-                    self._set(message=f"Sync {tf}: {n} velas novas/atualizadas")
+                    stored_now = int(self._snap.get("stored_count") or 0)
+                    if stored_now <= 0:
+                        n = self._backfill_chunked(client, asset, tf)
+                    else:
+                        n = self._upsert_tf(
+                            client, asset, tf, backfill=True
+                        )
+                    self._set(
+                        message=(
+                            f"Sync {tf}: {n} velas novas/atualizadas"
+                            if n > 0
+                            else (
+                                f"Sync {tf}: 0 velas — Pocket nao retornou "
+                                f"historico (verifique SSID/ativo)"
+                            )
+                        )
+                    )
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
                         self._snap["per_tf"][tf] = {
