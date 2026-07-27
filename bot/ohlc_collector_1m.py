@@ -6,6 +6,7 @@ Retencao 90 dias; aviso 1 dia antes na UI.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -20,9 +21,9 @@ from bot.ohlc_store import (
     delete_candles_since,
     fetch_candles,
     last_opened_at,
-    merge_ohlc_with_existing,
     run_retention_cleanup_1m,
     retention_status_1m,
+    sanitize_ohlc_spikes,
     stored_summary,
     supabase_ok,
     upsert_candles,
@@ -294,9 +295,7 @@ class OhlcCollector1m:
                     keep.append(row)
             keep = filter_closed_candles(keep, TIMEFRAMES["1m"])
             if keep:
-                keep = merge_ohlc_with_existing(
-                    keep, asset=asset, timeframe="1m", table=TABLE_1M
-                )
+                keep = sanitize_ohlc_spikes(keep)
                 upserted = upsert_candles(keep, table=TABLE_1M) if keep else 0
             self._purge_forming_candle(asset, "1m")
             with self._lock:
@@ -357,20 +356,117 @@ class OhlcCollector1m:
         # Live: no minimo 30 min, no maximo LIVE_OFFSET, mas nunca menos que o gap.
         return max(min(max(gap, period * 30), default), period * 5)
 
+    def _as_candle_list(self, raw: Any) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return []
+        if isinstance(raw, dict):
+            for key in ("data", "candles", "history"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return [x for x in val if isinstance(x, dict)]
+            return []
+        if isinstance(raw, list):
+            return [x for x in raw if isinstance(x, dict)]
+        return []
+
     def _fetch_tf(
         self, client: PocketOption, asset: str, tf: str, offset: int
     ) -> list[dict[str, Any]]:
+        """Historico limpo da Pocket — evita get_candles()/live (max_rows=100 + ticks).
+
+        get_candles() na BinaryOptionsToolsV2 chama get_candles_live com max_rows=100
+        e mescla ticks no OHLC, gerando pavios/flats errados. Aqui usamos
+        get_candles_advanced + history + compile_candles (como a propria lib no seed).
+        """
         period = TIMEFRAMES[tf]
-        raw = client.get_candles(asset, period, int(offset))
-        if not isinstance(raw, list):
-            raise RuntimeError(f"Resposta inesperada get_candles ({tf})")
-        rows: list[dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            norm = normalize_candle(item, asset=asset, timeframe=tf)
-            if norm:
-                rows.append(norm)
+        offset = int(offset)
+        # Mesmo offset da lib (Pocket platform time ≈ UTC+2).
+        platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
+        platform_time = int(time.time()) + platform_offset
+        groups: list[list[dict[str, Any]]] = []
+
+        try:
+            groups.append(
+                self._as_candle_list(
+                    client.get_candles_advanced(
+                        asset, period, offset, platform_time
+                    )
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            groups.append(self._as_candle_list(client.history(asset, period)))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            groups.append(
+                self._as_candle_list(
+                    client.compile_candles(asset, period, offset)
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Fallback controlado: live com max_rows alto (ja vem com time ajustado).
+        if not any(groups):
+            hours = max(0.1, offset / 3600.0)
+            max_rows = min(max(offset // period + 20, 300), 5000)
+            it = None
+            try:
+                it = client.get_candles_live(
+                    asset, period, hours=hours, max_rows=max_rows
+                )
+                closed, _forming = next(it)
+                groups.append(self._as_candle_list(closed))
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                # Encerra o generator para unsubscribe de ticks.
+                if it is not None:
+                    try:
+                        it.close()  # type: ignore[attr-defined]
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        by_key: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            # advanced/history/compile: aplicar offset. live fallback: time ja corrigido.
+            # Heuristica: se o time bruto esta ~7200s a frente de agora, aplicar offset.
+            for item in group:
+                ts_raw = None
+                for key in ("time", "timestamp", "t", "from", "open_time"):
+                    if key in item:
+                        try:
+                            ts_raw = int(float(item[key]))
+                            break
+                        except (TypeError, ValueError):
+                            continue
+                use_offset = platform_offset
+                if ts_raw is not None:
+                    if ts_raw > 10_000_000_000:
+                        ts_raw //= 1000
+                    now_u = int(time.time())
+                    # Se ja parece UTC (perto de agora), nao subtrai de novo.
+                    if abs(ts_raw - now_u) < 3600 * 6:
+                        use_offset = 0
+                    elif ts_raw - now_u > 1800:
+                        use_offset = platform_offset
+                norm = normalize_candle(
+                    item,
+                    asset=asset,
+                    timeframe=tf,
+                    time_offset=use_offset,
+                )
+                if norm:
+                    by_key[str(norm["opened_at"])] = norm
+        rows = list(by_key.values())
+        rows.sort(key=lambda r: str(r.get("opened_at") or ""))
         return rows
 
     def _upsert_tf(
@@ -417,9 +513,8 @@ class OhlcCollector1m:
         rows = filter_closed_candles(rows, period)
         if not rows:
             return 0
-        rows = merge_ohlc_with_existing(
-            rows, asset=asset, timeframe=tf, table=TABLE_1M
-        )
+        # Substitui OHLC do Pocket (sem merge que amplia spike antigo).
+        rows = sanitize_ohlc_spikes(rows)
         if not rows:
             return 0
         n = upsert_candles(rows, table=TABLE_1M)
@@ -548,9 +643,7 @@ class OhlcCollector1m:
                 if ts >= cutoff:
                     keep.append(row)
             keep = filter_closed_candles(keep, period)
-            keep = merge_ohlc_with_existing(
-                keep, asset=asset, timeframe="1m", table=TABLE_1M
-            )
+            keep = sanitize_ohlc_spikes(keep)
             n = upsert_candles(keep, table=TABLE_1M) if keep else 0
             self._purge_forming_candle(asset, "1m")
             with self._lock:
@@ -658,9 +751,7 @@ class OhlcCollector1m:
                     keep.append(row)
             keep = filter_closed_candles(keep, period)
             if keep:
-                keep = merge_ohlc_with_existing(
-                    keep, asset=asset, timeframe="1m", table=TABLE_1M
-                )
+                keep = sanitize_ohlc_spikes(keep)
                 n = upsert_candles(keep, table=TABLE_1M) if keep else 0
                 self._purge_forming_candle(asset, "1m")
                 self._set(message=f"Buraco 1m reparado: {n} velas upsert")
