@@ -264,9 +264,11 @@
               <canvas id="pnf-chart" aria-label="Gráfico de Pontos"></canvas>
             </div>
             <div id="prob-wrap" class="prob-wrap">
-              <p class="prob-title">
-                Probabilidade condicional ao saldo P−N · negativo: close futuro &gt; atual · positivo: close futuro &lt; atual
+              <p class="prob-title" id="prob-title">
+                Probabilidade · saldo negativo (−): close em 1h/4h/8h <strong>acima</strong> do atual ·
+                saldo positivo (+): close em 1h/4h/8h <strong>abaixo</strong> do atual
               </p>
+              <p class="prob-title" id="prob-side-hint" style="margin-top:-0.15rem;color:#cbd5e1"></p>
               <div class="chart-wrap chart-wrap--prob">
                 <div id="prob-chart"></div>
               </div>
@@ -717,7 +719,11 @@
           const now = candles[i].close;
           const fut = candles[i + horizonBars].close;
           const favorable =
-            s < 0 ? fut > now : s > 0 ? fut < now : fut > now;
+            s < 0
+              ? fut > now // negativo → sobe
+              : s > 0
+                ? fut < now // positivo → desce (abaixo)
+                : fut > now;
           let b = buckets.get(s);
           if (!b) {
             b = { hits: 0, n: 0 };
@@ -766,6 +772,21 @@
         const lines = buildProbLines(rawCandles);
         lastProbLines = lines;
         lastCumPoints = buildCumData(rawCandles).points;
+        const scores = buildCumScores(rawCandles);
+        const lastScore = scores.length ? scores[scores.length - 1] : 0;
+        const hintEl = document.getElementById("prob-side-hint");
+        if (hintEl) {
+          if (lastScore > 0) {
+            hintEl.textContent =
+              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (1h / 4h / 8h).`;
+          } else if (lastScore < 0) {
+            hintEl.textContent =
+              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (1h / 4h / 8h).`;
+          } else {
+            hintEl.textContent =
+              "Saldo atual: 0 → linhas = % de o close futuro ficar ACIMA do atual.";
+          }
+        }
         for (const hz of PROB_HORIZONS) {
           probSeries[hz.key].setData(lines[hz.key] || []);
         }
