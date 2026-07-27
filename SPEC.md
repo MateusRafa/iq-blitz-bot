@@ -102,4 +102,11 @@ delta       = ceil((buffer - win_pool(D) + S_other) / payout_atual)
 5. Bot fica em **stand-by** até Iniciar (não opera sozinho no boot).
 6. Conta real só depois de estável em DEMO.
 
+### Coletores OHLC (portal)
+
+- `/ohlc` — candles **1h** → tabela `ohlc_candles` (`sql/ohlc_candles.sql`).
+- `/ohlc-1m` — candles **1m** → tabela `ohlc_candles_1m` (`sql/ohlc_candles_1m.sql`).
+  Mesmos modos de gráfico/indicadores. Retenção **90 dias**; aviso popup **1 dia
+  antes** + download CSV (`Export CSV` / Baixar em risco).
+
 Local: `PYTHONPATH=. uvicorn web.app:app --reload --port 8080`
