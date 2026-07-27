@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
@@ -13,7 +15,13 @@ except ImportError:
     create_client = None
 
 TABLE = "ohlc_candles"
+TABLE_1M = "ohlc_candles_1m"
 UPSERT_CHUNK = 200
+FETCH_PAGE = 1000
+
+# Retencao da ferramenta 1m
+RETENTION_DAYS_1M = 90
+WARN_BEFORE_DAYS_1M = 1
 
 
 def _service_role_key() -> str:
@@ -46,70 +54,7 @@ def supabase_ok() -> tuple[bool, str]:
     return True, ""
 
 
-def upsert_candles(rows: list[dict[str, Any]]) -> int:
-    """Upsert por (asset, timeframe, opened_at). Retorna quantas linhas enviadas."""
-    if not rows:
-        return 0
-    ok, msg = supabase_ok()
-    if not ok:
-        raise RuntimeError(msg)
-    sb = cliente_supabase()
-    assert sb is not None
-    total = 0
-    for i in range(0, len(rows), UPSERT_CHUNK):
-        chunk = rows[i : i + UPSERT_CHUNK]
-        (
-            sb.table(TABLE)
-            .upsert(chunk, on_conflict="asset,timeframe,opened_at")
-            .execute()
-        )
-        total += len(chunk)
-    return total
-
-
-def count_candles(asset: str, timeframe: str = "1h") -> int:
-    """Quantidade de velas salvas no Supabase para asset+tf."""
-    ok, msg = supabase_ok()
-    if not ok:
-        raise RuntimeError(msg)
-    sb = cliente_supabase()
-    assert sb is not None
-    res = (
-        sb.table(TABLE)
-        .select("id", count="exact")
-        .eq("asset", asset)
-        .eq("timeframe", timeframe)
-        .limit(1)
-        .execute()
-    )
-    count = getattr(res, "count", None)
-    if count is not None:
-        return int(count)
-    # Fallback se o client nao devolver count
-    data = getattr(res, "data", None) or []
-    return len(data)
-
-
-def last_opened_at(asset: str, timeframe: str = "1h") -> datetime | None:
-    """Maior opened_at salvo (UTC) ou None se vazio."""
-    ok, msg = supabase_ok()
-    if not ok:
-        raise RuntimeError(msg)
-    sb = cliente_supabase()
-    assert sb is not None
-    res = (
-        sb.table(TABLE)
-        .select("opened_at")
-        .eq("asset", asset)
-        .eq("timeframe", timeframe)
-        .order("opened_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    data = getattr(res, "data", None) or []
-    if not data:
-        return None
-    raw = data[0].get("opened_at")
+def _parse_opened_at(raw: Any) -> datetime | None:
     if not raw:
         return None
     if isinstance(raw, datetime):
@@ -124,11 +69,107 @@ def last_opened_at(asset: str, timeframe: str = "1h") -> datetime | None:
     return dt
 
 
+def upsert_candles(
+    rows: list[dict[str, Any]], *, table: str = TABLE
+) -> int:
+    """Upsert por (asset, timeframe, opened_at). Retorna quantas linhas enviadas."""
+    if not rows:
+        return 0
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    total = 0
+    for i in range(0, len(rows), UPSERT_CHUNK):
+        chunk = rows[i : i + UPSERT_CHUNK]
+        (
+            sb.table(table)
+            .upsert(chunk, on_conflict="asset,timeframe,opened_at")
+            .execute()
+        )
+        total += len(chunk)
+    return total
+
+
+def count_candles(
+    asset: str, timeframe: str = "1h", *, table: str = TABLE
+) -> int:
+    """Quantidade de velas salvas no Supabase para asset+tf."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    res = (
+        sb.table(table)
+        .select("id", count="exact")
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .limit(1)
+        .execute()
+    )
+    count = getattr(res, "count", None)
+    if count is not None:
+        return int(count)
+    data = getattr(res, "data", None) or []
+    return len(data)
+
+
+def last_opened_at(
+    asset: str, timeframe: str = "1h", *, table: str = TABLE
+) -> datetime | None:
+    """Maior opened_at salvo (UTC) ou None se vazio."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    res = (
+        sb.table(table)
+        .select("opened_at")
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .order("opened_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    data = getattr(res, "data", None) or []
+    if not data:
+        return None
+    return _parse_opened_at(data[0].get("opened_at"))
+
+
+def oldest_opened_at(
+    asset: str, timeframe: str = "1h", *, table: str = TABLE
+) -> datetime | None:
+    """Menor opened_at salvo (UTC) ou None se vazio."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    res = (
+        sb.table(table)
+        .select("opened_at")
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .order("opened_at", desc=False)
+        .limit(1)
+        .execute()
+    )
+    data = getattr(res, "data", None) or []
+    if not data:
+        return None
+    return _parse_opened_at(data[0].get("opened_at"))
+
+
 def fetch_candles(
     asset: str,
     *,
     timeframe: str = "1h",
     limit: int = 200,
+    table: str = TABLE,
 ) -> list[dict[str, Any]]:
     """Candles mais recentes (ordem cronologica crescente para o grafico)."""
     ok, msg = supabase_ok()
@@ -136,9 +177,9 @@ def fetch_candles(
         raise RuntimeError(msg)
     sb = cliente_supabase()
     assert sb is not None
-    lim = max(1, min(int(limit), 2000))
+    lim = max(1, min(int(limit), 5000))
     res = (
-        sb.table(TABLE)
+        sb.table(table)
         .select("opened_at,open,high,low,close,volume")
         .eq("asset", asset)
         .eq("timeframe", timeframe)
@@ -151,11 +192,194 @@ def fetch_candles(
     return data
 
 
-def stored_summary(asset: str, timeframe: str = "1h") -> dict[str, Any]:
+def count_before(
+    asset: str,
+    before: datetime,
+    *,
+    timeframe: str = "1h",
+    table: str = TABLE,
+) -> int:
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    res = (
+        sb.table(table)
+        .select("id", count="exact")
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .lt("opened_at", before.isoformat())
+        .limit(1)
+        .execute()
+    )
+    count = getattr(res, "count", None)
+    if count is not None:
+        return int(count)
+    return 0
+
+
+def delete_candles_before(
+    asset: str,
+    before: datetime,
+    *,
+    timeframe: str = "1h",
+    table: str = TABLE,
+) -> int:
+    """Apaga velas com opened_at < before. Retorna estimativa via count previo."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    n = count_before(asset, before, timeframe=timeframe, table=table)
+    if n <= 0:
+        return 0
+    sb = cliente_supabase()
+    assert sb is not None
+    (
+        sb.table(table)
+        .delete()
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .lt("opened_at", before.isoformat())
+        .execute()
+    )
+    return n
+
+
+def fetch_candles_range(
+    asset: str,
+    *,
+    timeframe: str = "1h",
+    table: str = TABLE,
+    before: datetime | None = None,
+    after: datetime | None = None,
+    max_rows: int = 200_000,
+) -> list[dict[str, Any]]:
+    """Exporta candles (paginado) em ordem crescente."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    out: list[dict[str, Any]] = []
+    offset = 0
+    while len(out) < max_rows:
+        q = (
+            sb.table(table)
+            .select("opened_at,open,high,low,close,volume,timeframe,asset")
+            .eq("asset", asset)
+            .eq("timeframe", timeframe)
+            .order("opened_at", desc=False)
+            .range(offset, offset + FETCH_PAGE - 1)
+        )
+        if before is not None:
+            q = q.lt("opened_at", before.isoformat())
+        if after is not None:
+            q = q.gte("opened_at", after.isoformat())
+        res = q.execute()
+        chunk = list(getattr(res, "data", None) or [])
+        if not chunk:
+            break
+        out.extend(chunk)
+        if len(chunk) < FETCH_PAGE:
+            break
+        offset += FETCH_PAGE
+    return out[:max_rows]
+
+
+def candles_to_csv(rows: list[dict[str, Any]]) -> str:
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=[
+            "asset",
+            "timeframe",
+            "opened_at",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ],
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for r in rows:
+        writer.writerow(r)
+    return buf.getvalue()
+
+
+def retention_status_1m(
+    asset: str,
+    *,
+    retention_days: int = RETENTION_DAYS_1M,
+    warn_before_days: int = WARN_BEFORE_DAYS_1M,
+) -> dict[str, Any]:
+    """Estado da limpeza 1m (aviso 1 dia antes / delete apos 90 dias)."""
+    now = datetime.now(timezone.utc)
+    delete_before = now - timedelta(days=retention_days)
+    warn_before = now - timedelta(days=max(retention_days - warn_before_days, 0))
+    try:
+        oldest = oldest_opened_at(asset, "1m", table=TABLE_1M)
+        rows_delete = count_before(
+            asset, delete_before, timeframe="1m", table=TABLE_1M
+        )
+        rows_at_risk = count_before(
+            asset, warn_before, timeframe="1m", table=TABLE_1M
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "retention_days": retention_days,
+            "warn_before_days": warn_before_days,
+            "oldest": None,
+            "next_delete_at": None,
+            "delete_before": delete_before.isoformat(),
+            "warn": False,
+            "rows_to_delete": 0,
+            "rows_at_risk": 0,
+            "err": str(exc)[:200],
+        }
+    next_delete_at = None
+    if oldest is not None:
+        next_delete_at = oldest + timedelta(days=retention_days)
+    warn = rows_at_risk > 0 or (
+        next_delete_at is not None
+        and (next_delete_at - now) <= timedelta(days=warn_before_days)
+        and (next_delete_at - now).total_seconds() > 0
+    )
+    return {
+        "retention_days": retention_days,
+        "warn_before_days": warn_before_days,
+        "oldest": oldest.isoformat() if oldest else None,
+        "next_delete_at": next_delete_at.isoformat() if next_delete_at else None,
+        "delete_before": delete_before.isoformat(),
+        "warn": warn,
+        "rows_to_delete": rows_delete,
+        "rows_at_risk": rows_at_risk,
+        "err": None,
+    }
+
+
+def run_retention_cleanup_1m(asset: str) -> dict[str, Any]:
+    """Apaga candles 1m com mais de RETENTION_DAYS_1M."""
+    before = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS_1M)
+    deleted = delete_candles_before(
+        asset, before, timeframe="1m", table=TABLE_1M
+    )
+    return {
+        "deleted": deleted,
+        "before": before.isoformat(),
+        "retention": retention_status_1m(asset),
+    }
+
+
+def stored_summary(
+    asset: str, timeframe: str = "1h", *, table: str = TABLE
+) -> dict[str, Any]:
     """Resumo do que ja esta no banco (para a UI)."""
     try:
-        n = count_candles(asset, timeframe)
-        last = last_opened_at(asset, timeframe)
+        n = count_candles(asset, timeframe, table=table)
+        last = last_opened_at(asset, timeframe, table=table)
     except Exception as exc:  # noqa: BLE001
         return {
             "stored_count": None,
