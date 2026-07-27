@@ -442,6 +442,8 @@
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
+      let lastChartFingerprint = "";
+      let lastForcedChartAt = 0;
       let lastMetaText = "";
       let pnfColumns = [];
       const pnfOptsEl = document.getElementById("pnf-opts");
@@ -1321,16 +1323,30 @@
           });
           const data = await api("/api/ohlc1m/candles?" + q.toString());
           const rows = data.candles || [];
+          const lastRow = rows.length ? rows[rows.length - 1] : null;
+          const fingerprint = lastRow
+            ? String(lastRow.opened_at) +
+              "|" +
+              String(lastRow.open) +
+              "|" +
+              String(lastRow.high) +
+              "|" +
+              String(lastRow.low) +
+              "|" +
+              String(lastRow.close)
+            : "";
           if (
             !force &&
             data.asset === lastChartAsset &&
-            rows.length === lastChartCount
+            rows.length === lastChartCount &&
+            fingerprint === lastChartFingerprint
           ) {
             resizeChart();
             return;
           }
           lastChartAsset = data.asset || "";
           lastChartCount = rows.length;
+          lastChartFingerprint = fingerprint;
           if (!rows.length) {
             rawCandles = [];
             lastMetaText =
@@ -1498,7 +1514,14 @@
       async function refresh() {
         const st = await api("/api/ohlc1m/status");
         render(st);
-        await loadChart(st.asset || assetInput.value.trim(), false);
+        const running = !!st.running;
+        const now = Date.now();
+        // Com coletor ligado: forca redesenho do grafico no maximo a cada 30s
+        // (alem da deteccao por fingerprint da ultima vela).
+        const forceChart =
+          running && now - lastForcedChartAt >= 30_000;
+        if (forceChart) lastForcedChartAt = now;
+        await loadChart(st.asset || assetInput.value.trim(), forceChart);
         return st;
       }
 
