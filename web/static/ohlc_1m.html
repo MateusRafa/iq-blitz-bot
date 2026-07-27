@@ -705,13 +705,23 @@
       }
 
       function buildOhlcData(candles) {
-        return candles.map((c) => ({
-          time: c.time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }));
+        // Doji (sem corpo): cor neutra — evita parecer "positivo" so por close>=open.
+        return candles.map((c) => {
+          const body = Math.abs(c.close - c.open);
+          const bar = {
+            time: c.time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          };
+          if (body <= 1e-12) {
+            bar.color = "#94a3b8";
+            bar.borderColor = "#94a3b8";
+            bar.wickColor = "#94a3b8";
+          }
+          return bar;
+        });
       }
 
       /** Corpo/pavios relativos ao open = 0 (positivos acima, negativos abaixo). */
