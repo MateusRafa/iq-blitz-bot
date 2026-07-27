@@ -304,6 +304,17 @@ def ohlc1m_cleanup(_: None = Depends(require_token)) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/ohlc1m/pull-now")
+def ohlc1m_pull_now(_: None = Depends(require_token)) -> dict:
+    """Puxada manual igual a 1a sync: so velas fechadas, upsert sem duplicar."""
+    try:
+        return collector_1m.pull_now()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/ohlc1m/resync-recent")
 def ohlc1m_resync_recent(
     body: OhlcResyncBody = OhlcResyncBody(),
