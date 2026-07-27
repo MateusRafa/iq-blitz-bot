@@ -317,13 +317,20 @@ class OhlcCollector1m:
             time.sleep(min(left, 1.0))
 
     def _wait_for_next_cycle(self) -> None:
-        align = _env_flag_default_on("OHLC_1M_ALIGN_MINUTE", "1")
+        # Padrao: poll a cada 30s (grafico atualiza mais rapido).
+        # OHLC_1M_ALIGN_MINUTE=1 volta ao alinhamento por minuto UTC.
+        align = os.environ.get("OHLC_1M_ALIGN_MINUTE", "0").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "",
+        )
         after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 5)
         if align:
             wait = seconds_until_next_minute_fetch(after_minute_seconds=after)
             mode = "minutely"
         else:
-            wait = float(max(_env_int("OHLC_1M_POLL_SECONDS", 60), 15))
+            wait = float(max(_env_int("OHLC_1M_POLL_SECONDS", 30), 15))
             mode = "poll"
         next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
         self._set(
@@ -368,9 +375,7 @@ class OhlcCollector1m:
                     self._set(message=f"Sync {tf} falhou: {exc}")
 
             self._maybe_cleanup(asset)
-            self._close_client(client)
-            client = None
-
+            # Mantem a conexao aberta no loop de 30s (reconecta so se cair).
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
                 if self._stop.is_set():
@@ -381,7 +386,8 @@ class OhlcCollector1m:
                         message=f"Buscando 1m novos ({asset})…",
                         next_fetch_at=None,
                     )
-                    client = self._connect()
+                    if client is None:
+                        client = self._connect()
                     for tf in TIMEFRAMES:
                         if self._stop.is_set():
                             break
@@ -408,15 +414,17 @@ class OhlcCollector1m:
                                     message=f"Reconectando… ({exc})",
                                 )
                                 self._close_client(client)
-                                time.sleep(3.0)
+                                client = None
+                                time.sleep(2.0)
                                 client = self._connect()
                                 self._upsert_tf(
                                     client, asset, tf, backfill=False
                                 )
-                    self._maybe_cleanup(asset)
+                    # Limpeza so de vez em quando (a cada ~10 min de uptime).
+                    if int(time.time()) % 600 < 35:
+                        self._maybe_cleanup(asset)
                 except Exception as exc:  # noqa: BLE001
                     self._set(message=f"Ciclo falhou: {exc}")
-                finally:
                     self._close_client(client)
                     client = None
         except Exception as exc:  # noqa: BLE001
