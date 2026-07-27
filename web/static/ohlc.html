@@ -94,6 +94,12 @@
         color: #94a3b8;
         margin-right: 0.15rem;
       }
+      .prob-subopts {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+      }
       .prob-wrap {
         display: none;
         margin-top: 0.65rem;
@@ -235,6 +241,14 @@
             <div id="cum-opts" class="cum-opts" role="group" aria-label="Indicadores do acumulado">
               <span class="pnf-opts-label">Prob. fechamento:</span>
               <button type="button" class="btn btn-mode" id="btn-prob-toggle">Desligado</button>
+              <span id="prob-line-opts" class="prob-subopts" hidden>
+                <span class="pnf-opts-label">Linhas:</span>
+                <button type="button" class="btn btn-mode active" data-prob-line="1h">1h</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="4h">4h</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="8h">8h</button>
+                <span class="pnf-opts-label">Sync:</span>
+                <button type="button" class="btn btn-mode" id="btn-prob-link">Link acum.</button>
+              </span>
             </div>
             <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
               —
@@ -253,11 +267,6 @@
               <p class="prob-title">
                 Probabilidade condicional ao saldo P−N · negativo: close futuro &gt; atual · positivo: close futuro &lt; atual
               </p>
-              <div class="prob-legend">
-                <span class="lg-1h">1h</span>
-                <span class="lg-4h">4h</span>
-                <span class="lg-8h">8h</span>
-              </div>
               <div class="chart-wrap chart-wrap--prob">
                 <div id="prob-chart"></div>
               </div>
@@ -316,9 +325,13 @@
       const probWrapEl = document.getElementById("prob-wrap");
       const probChartEl = document.getElementById("prob-chart");
       const btnProbToggle = document.getElementById("btn-prob-toggle");
+      const btnProbLink = document.getElementById("btn-prob-link");
+      const probLineOptsEl = document.getElementById("prob-line-opts");
       const CHART_MODE_KEY = "iq_blitz_ohlc_chart_mode";
       const PNF_SRC_KEY = "iq_blitz_ohlc_pnf_src";
       const PROB_ON_KEY = "iq_blitz_ohlc_prob_on";
+      const PROB_LINK_KEY = "iq_blitz_ohlc_prob_link";
+      const PROB_LINES_KEY = "iq_blitz_ohlc_prob_lines";
       const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
       const PROB_HORIZONS = [
         { key: "1h", bars: 1, color: "#22d3ee" },
@@ -342,6 +355,22 @@
       let pnfSource = localStorage.getItem(PNF_SRC_KEY) || "hl";
       if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
       let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
+      let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
+      let probLinesOn = { "1h": true, "4h": true, "8h": true };
+      try {
+        const savedLines = JSON.parse(localStorage.getItem(PROB_LINES_KEY) || "");
+        if (savedLines && typeof savedLines === "object") {
+          for (const hz of PROB_HORIZONS) {
+            if (typeof savedLines[hz.key] === "boolean") {
+              probLinesOn[hz.key] = savedLines[hz.key];
+            }
+          }
+        }
+      } catch (_) {}
+      let lastProbLines = { "1h": [], "4h": [], "8h": [] };
+      let lastCumPoints = [];
+      let probLinkBound = false;
+      let syncingCharts = false;
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
@@ -360,6 +389,15 @@
         cumOptsEl.classList.toggle("visible", chartMode === "cum");
         btnProbToggle.classList.toggle("active", probOn);
         btnProbToggle.textContent = probOn ? "Ligado" : "Desligado";
+        const showLineOpts = chartMode === "cum" && probOn;
+        probLineOptsEl.hidden = !showLineOpts;
+        if (showLineOpts) {
+          probLineOptsEl.querySelectorAll("[data-prob-line]").forEach((btn) => {
+            btn.classList.toggle("active", !!probLinesOn[btn.dataset.probLine]);
+          });
+          btnProbLink.classList.toggle("active", probLinkOn);
+          btnProbLink.textContent = probLinkOn ? "Link ON" : "Link acum.";
+        }
         updateProbPanel();
       }
       syncModeButtons();
@@ -472,6 +510,7 @@
             lastValueVisible: true,
             priceLineVisible: false,
             title: hz.key,
+            visible: !!probLinesOn[hz.key],
           });
         }
         // linha 50%
@@ -483,6 +522,96 @@
           axisLabelVisible: true,
           title: "50%",
         });
+        bindProbChartLink();
+      }
+
+      function firstVisibleProbSeries() {
+        for (const hz of PROB_HORIZONS) {
+          if (probLinesOn[hz.key] && probSeries[hz.key]) return probSeries[hz.key];
+        }
+        return probSeries["1h"];
+      }
+
+      function valueAtTime(points, time) {
+        if (!points || !points.length || time == null) return null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time === time) return points[i].value;
+        }
+        // fallback: nearest previous
+        let best = null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time <= time) best = points[i].value;
+          else break;
+        }
+        return best;
+      }
+
+      function bindProbChartLink() {
+        if (probLinkBound || !chart || !probChart) return;
+        probLinkBound = true;
+
+        const mirrorCrosshair = (fromCum, param) => {
+          if (!probLinkOn || syncingCharts) return;
+          if (chartMode !== "cum" || !probOn) return;
+          const src = fromCum ? chart : probChart;
+          const dst = fromCum ? probChart : chart;
+          const dstSeries = fromCum ? firstVisibleProbSeries() : activeSeries;
+          if (!dst || !dstSeries) return;
+          syncingCharts = true;
+          try {
+            if (!param || param.time == null) {
+              if (typeof dst.clearCrosshairPosition === "function") {
+                dst.clearCrosshairPosition();
+              }
+              return;
+            }
+            const price = fromCum
+              ? valueAtTime(
+                  lastProbLines[
+                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "1h"
+                  ],
+                  param.time
+                )
+              : valueAtTime(lastCumPoints, param.time);
+            const y = price == null ? (fromCum ? 50 : 0) : price;
+            if (typeof dst.setCrosshairPosition === "function") {
+              dst.setCrosshairPosition(y, param.time, dstSeries);
+            }
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        chart.subscribeCrosshairMove((param) => mirrorCrosshair(true, param));
+        probChart.subscribeCrosshairMove((param) => mirrorCrosshair(false, param));
+
+        const mirrorRange = (fromCum, range) => {
+          if (!probLinkOn || syncingCharts || !range) return;
+          if (chartMode !== "cum" || !probOn) return;
+          const dst = fromCum ? probChart : chart;
+          if (!dst) return;
+          syncingCharts = true;
+          try {
+            dst.timeScale().setVisibleLogicalRange(range);
+          } catch (_) {
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          mirrorRange(true, range);
+        });
+        probChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          mirrorRange(false, range);
+        });
+      }
+
+      function applyProbLineVisibility() {
+        for (const hz of PROB_HORIZONS) {
+          if (!probSeries[hz.key]) continue;
+          probSeries[hz.key].applyOptions({ visible: !!probLinesOn[hz.key] });
+        }
       }
 
       function attachZeroLine(series) {
@@ -624,21 +753,34 @@
         const show = chartMode === "cum" && probOn;
         probWrapEl.classList.toggle("visible", show);
         if (!show) return;
+        ensureChart();
         ensureProbChart();
+        bindProbChartLink();
         if (!probChart || !probSeries["1h"]) return;
         if (!rawCandles.length) {
           for (const hz of PROB_HORIZONS) probSeries[hz.key].setData([]);
+          lastProbLines = { "1h": [], "4h": [], "8h": [] };
+          lastCumPoints = [];
           return;
         }
         const lines = buildProbLines(rawCandles);
+        lastProbLines = lines;
+        lastCumPoints = buildCumData(rawCandles).points;
         for (const hz of PROB_HORIZONS) {
           probSeries[hz.key].setData(lines[hz.key] || []);
         }
+        applyProbLineVisibility();
         resizeProbChart();
         probChart.timeScale().fitContent();
         requestAnimationFrame(() => {
           resizeProbChart();
           probChart.timeScale().fitContent();
+          if (probLinkOn && chart) {
+            try {
+              const range = chart.timeScale().getVisibleLogicalRange();
+              if (range) probChart.timeScale().setVisibleLogicalRange(range);
+            } catch (_) {}
+          }
         });
       }
 
@@ -646,6 +788,40 @@
         probOn = !!on;
         localStorage.setItem(PROB_ON_KEY, probOn ? "1" : "0");
         syncModeButtons();
+      }
+
+      function setProbLineOn(key, on) {
+        if (!PROB_HORIZONS.some((h) => h.key === key)) return;
+        // não deixar todas desligadas
+        const next = { ...probLinesOn, [key]: !!on };
+        if (!PROB_HORIZONS.some((h) => next[h.key])) return;
+        probLinesOn = next;
+        localStorage.setItem(PROB_LINES_KEY, JSON.stringify(probLinesOn));
+        syncModeButtons();
+        applyProbLineVisibility();
+      }
+
+      function setProbLinkOn(on) {
+        probLinkOn = !!on;
+        localStorage.setItem(PROB_LINK_KEY, probLinkOn ? "1" : "0");
+        syncModeButtons();
+        if (probLinkOn && chart && probChart) {
+          try {
+            const range = chart.timeScale().getVisibleLogicalRange();
+            if (range) {
+              syncingCharts = true;
+              probChart.timeScale().setVisibleLogicalRange(range);
+              syncingCharts = false;
+            }
+          } catch (_) {
+            syncingCharts = false;
+          }
+        } else if (chart && probChart) {
+          try {
+            chart.clearCrosshairPosition();
+            probChart.clearCrosshairPosition();
+          } catch (_) {}
+        }
       }
 
       /**
@@ -1246,6 +1422,17 @@
 
       btnProbToggle.addEventListener("click", () => {
         setProbOn(!probOn);
+      });
+
+      probLineOptsEl.querySelectorAll("[data-prob-line]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.dataset.probLine;
+          setProbLineOn(key, !probLinesOn[key]);
+        });
+      });
+
+      btnProbLink.addEventListener("click", () => {
+        setProbLinkOn(!probLinkOn);
       });
 
       (async () => {
