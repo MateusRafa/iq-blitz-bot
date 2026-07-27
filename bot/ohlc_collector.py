@@ -99,7 +99,11 @@ def _f(raw: dict[str, Any], *keys: str) -> float | None:
 
 
 def normalize_candle(
-    raw: dict[str, Any], *, asset: str, timeframe: str
+    raw: dict[str, Any],
+    *,
+    asset: str,
+    timeframe: str,
+    time_offset: int = 0,
 ) -> dict[str, Any] | None:
     ts = _candle_time_unix(raw)
     o = _f(raw, "open", "Open", "o")
@@ -108,12 +112,17 @@ def normalize_candle(
     c = _f(raw, "close", "Close", "c")
     if ts is None or o is None or h is None or lo is None or c is None:
         return None
+    # Pocket (BinaryOptionsToolsV2) usa timestamps com offset de plataforma (~7200s).
+    if time_offset:
+        ts -= int(time_offset)
     # Sanitiza OHLC (evita pavios inconsistentes / outliers de API).
     h = max(h, o, c)
     lo = min(lo, o, c)
     # Timeframe 1m: alinha opened_at ao minuto UTC.
     if timeframe == "1m":
         ts = (ts // 60) * 60
+    elif timeframe == "1h":
+        ts = (ts // 3600) * 3600
     vol = _f(raw, "volume", "Volume", "v")
     opened = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     row: dict[str, Any] = {
