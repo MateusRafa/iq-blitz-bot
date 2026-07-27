@@ -243,8 +243,7 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Candles <strong>1m</strong>. Sync incremental + retenção <strong>90 dias</strong> (aviso 1 dia antes). Sync puxa só o que falta a partir do
-              <strong>último candle salvo</strong> no Supabase.
+              Candles <strong>1m</strong>. Sync a cada <strong>5 minutos</strong> (só velas já fechadas; a aberta não entra) + retenção <strong>90 dias</strong> (aviso 1 dia antes).
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -1661,9 +1660,9 @@
         render(st);
         const running = !!st.running;
         const now = Date.now();
-        // Com coletor ligado: redesenha no maximo a cada 60s (vela fecha 1x/min).
+        // Com coletor ligado: redesenha no maximo a cada 5 min (mesmo ritmo do fetch).
         const forceChart =
-          running && now - lastForcedChartAt >= 60_000;
+          running && now - lastForcedChartAt >= 300_000;
         if (forceChart) lastForcedChartAt = now;
         await loadChart(st.asset || assetInput.value.trim(), forceChart);
         return st;
