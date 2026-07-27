@@ -444,6 +444,8 @@
       let lastChartCount = -1;
       let lastChartFingerprint = "";
       let lastForcedChartAt = 0;
+      let chartDataMode = null;
+      let chartFittedKey = "";
       let lastMetaText = "";
       let pnfColumns = [];
       const pnfOptsEl = document.getElementById("pnf-opts");
@@ -1180,12 +1182,14 @@
         attachZeroLine(activeSeries);
       }
 
-      function applyChartData() {
+      function applyChartData(opts) {
+        const forceFit = !!(opts && opts.fit);
         ensureChart();
         updateIndicators();
         if (chartMode === "pnf") {
           setPnFVisible(true);
           clearSeries();
+          chartDataMode = "pnf";
           if (!rawCandles.length) {
             pnfColumns = [];
             chartMeta.textContent =
@@ -1212,53 +1216,63 @@
           updateProbPanel();
           return;
         }
-        clearSeries();
         if (!rawCandles.length) {
+          clearSeries();
+          chartDataMode = null;
           chartMeta.textContent =
             lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
           updateProbPanel();
           return;
         }
 
-        if (chartMode === "ohlc") {
-          activeSeries = chart.addCandlestickSeries({
-            upColor: "#22d3ee",
-            downColor: "#f43f5e",
-            borderUpColor: "#22d3ee",
-            borderDownColor: "#f43f5e",
-            wickUpColor: "#22d3ee",
-            wickDownColor: "#f43f5e",
-            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
-          });
+        const modeChanged = chartDataMode !== chartMode || !activeSeries;
+        if (modeChanged) {
+          clearSeries();
+          chartDataMode = chartMode;
+          chartFittedKey = "";
+          if (chartMode === "ohlc") {
+            activeSeries = chart.addCandlestickSeries({
+              upColor: "#22d3ee",
+              downColor: "#f43f5e",
+              borderUpColor: "#22d3ee",
+              borderDownColor: "#f43f5e",
+              wickUpColor: "#22d3ee",
+              wickDownColor: "#f43f5e",
+              priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            });
+            activeSeries.setData(buildOhlcData(rawCandles));
+          } else if (chartMode === "signed") {
+            activeSeries = chart.addCandlestickSeries({
+              upColor: "#22d3ee",
+              downColor: "#f43f5e",
+              borderUpColor: "#22d3ee",
+              borderDownColor: "#f43f5e",
+              wickUpColor: "#22d3ee",
+              wickDownColor: "#f43f5e",
+              priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            });
+            activeSeries.setData(buildSignedData(rawCandles));
+            attachZeroLine(activeSeries);
+          } else if (chartMode === "cum") {
+            applyLineMode(buildCumData);
+          } else {
+            applyLineMode(buildStreakData);
+          }
+        } else if (chartMode === "ohlc") {
           activeSeries.setData(buildOhlcData(rawCandles));
         } else if (chartMode === "signed") {
-          activeSeries = chart.addCandlestickSeries({
-            upColor: "#22d3ee",
-            downColor: "#f43f5e",
-            borderUpColor: "#22d3ee",
-            borderDownColor: "#f43f5e",
-            wickUpColor: "#22d3ee",
-            wickDownColor: "#f43f5e",
-            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
-          });
           activeSeries.setData(buildSignedData(rawCandles));
-          attachZeroLine(activeSeries);
         } else if (chartMode === "cum") {
-          applyLineMode(buildCumData);
+          const { points, markers } = buildCumData(rawCandles);
+          activeSeries.setData(points);
+          activeSeries.setMarkers(markers);
         } else {
-          applyLineMode(buildStreakData);
+          const { points, markers } = buildStreakData(rawCandles);
+          activeSeries.setData(points);
+          activeSeries.setMarkers(markers);
         }
 
-        resizeChart();
-        chart.timeScale().fitContent();
-        requestAnimationFrame(() => {
-          resizeChart();
-          chart.timeScale().fitContent();
-        });
-        setTimeout(() => {
-          resizeChart();
-          chart.timeScale().fitContent();
-        }, 50);
+        fitChartIfNeeded(forceFit || modeChanged);
         if (lastMetaText) chartMeta.textContent = lastMetaText;
         updateProbPanel();
       }
@@ -1282,31 +1296,82 @@
       function toChartTime(iso) {
         const ms = Date.parse(iso);
         if (Number.isNaN(ms)) return null;
-        return Math.floor(ms / 1000);
+        // Alinha ao minuto UTC (evita timestamps "quebrados" da API).
+        return Math.floor(Math.floor(ms / 1000) / 60) * 60;
+      }
+
+      function fillMinuteGaps(candles, maxGapBars) {
+        const maxBars = maxGapBars == null ? 180 : maxGapBars;
+        if (!candles.length) return candles;
+        const out = [candles[0]];
+        for (let i = 1; i < candles.length; i++) {
+          const prev = out[out.length - 1];
+          const cur = candles[i];
+          const gap = Math.round((cur.time - prev.time) / 60);
+          if (gap > 1 && gap <= maxBars) {
+            const px = prev.close;
+            for (let t = prev.time + 60; t < cur.time; t += 60) {
+              out.push({ time: t, open: px, high: px, low: px, close: px });
+            }
+          }
+          out.push(cur);
+        }
+        return out;
+      }
+
+      function filterPriceOutliers(candles) {
+        if (candles.length < 20) return candles;
+        const closes = candles.map((c) => c.close).slice().sort((a, b) => a - b);
+        const mid = closes[Math.floor(closes.length / 2)];
+        if (!(mid > 0)) return candles;
+        // Remove velas absurdas (ex. preço ~10x fora do mediano) que "flutuam" no gráfico.
+        const lo = mid * 0.5;
+        const hi = mid * 1.5;
+        return candles.filter((c) => {
+          const vals = [c.open, c.high, c.low, c.close];
+          return vals.every((v) => v >= lo && v <= hi);
+        });
       }
 
       function rowsToCandles(rows) {
-        const series = [];
-        let prevT = null;
+        const byTime = new Map();
         for (const r of rows) {
           const t = toChartTime(r.opened_at);
           if (t == null) continue;
-          if (prevT != null && t <= prevT) continue;
           const o = Number(r.open);
           const h = Number(r.high);
           const l = Number(r.low);
           const c = Number(r.close);
           if (![o, h, l, c].every(Number.isFinite)) continue;
-          series.push({
+          if (o <= 0 || h <= 0 || l <= 0 || c <= 0) continue;
+          byTime.set(t, {
             time: t,
             open: o,
             high: Math.max(h, o, c),
             low: Math.min(l, o, c),
             close: c,
           });
-          prevT = t;
         }
+        let series = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+        series = filterPriceOutliers(series);
+        series = fillMinuteGaps(series, 180);
         return series;
+      }
+
+      function fitChartIfNeeded(forceFit) {
+        if (!chart) return;
+        const key = lastChartAsset + "|" + chartMode;
+        if (!forceFit && key === chartFittedKey) {
+          resizeChart();
+          return;
+        }
+        chartFittedKey = key;
+        resizeChart();
+        chart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        });
       }
 
       async function loadChart(asset, force) {
@@ -1335,6 +1400,7 @@
               "|" +
               String(lastRow.close)
             : "";
+          const assetChanged = (data.asset || "") !== lastChartAsset;
           if (
             !force &&
             data.asset === lastChartAsset &&
@@ -1353,13 +1419,13 @@
               "Nenhum candle no Supabase para " +
               (data.asset || asset || "—") +
               ". Inicie o coletor para gravar.";
-            applyChartData();
+            applyChartData({ fit: true });
             return;
           }
           rawCandles = rowsToCandles(rows);
           if (!rawCandles.length) {
             lastMetaText = "Dados OHLC inválidos para o gráfico.";
-            applyChartData();
+            applyChartData({ fit: true });
             return;
           }
           const first = rows[0].opened_at;
@@ -1367,13 +1433,13 @@
           lastMetaText =
             data.asset +
             " · 1m · " +
-            rows.length +
+            rawCandles.length +
             " velas · " +
             String(first).replace("T", " ").slice(0, 16) +
             " → " +
             String(last).replace("T", " ").slice(0, 16) +
             " UTC";
-          applyChartData();
+          applyChartData({ fit: assetChanged || force });
         } catch (e) {
           chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
         }
