@@ -129,9 +129,10 @@
         margin-right: 0.35rem;
         vertical-align: -1px;
       }
-      .prob-wrap .lg-1h::before { background: #22d3ee; }
-      .prob-wrap .lg-4h::before { background: #a78bfa; }
-      .prob-wrap .lg-8h::before { background: #fbbf24; }
+      .prob-wrap .lg-5m::before { background: #22d3ee; }
+      .prob-wrap .lg-15m::before { background: #a78bfa; }
+      .prob-wrap .lg-30m::before { background: #fbbf24; }
+      .prob-wrap .lg-1h::before { background: #34d399; }
       .chart-wrap--prob {
         height: 200px;
         min-height: 160px;
@@ -291,9 +292,10 @@
               <button type="button" class="btn btn-mode" id="btn-prob-toggle">Desligado</button>
               <span id="prob-line-opts" class="prob-subopts" hidden>
                 <span class="pnf-opts-label">Linhas:</span>
+                <button type="button" class="btn btn-mode active" data-prob-line="5m">5m</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="15m">15m</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="30m">30m</button>
                 <button type="button" class="btn btn-mode active" data-prob-line="1h">1h</button>
-                <button type="button" class="btn btn-mode active" data-prob-line="4h">4h</button>
-                <button type="button" class="btn btn-mode active" data-prob-line="8h">8h</button>
                 <span class="pnf-opts-label">Sync:</span>
                 <button type="button" class="btn btn-mode" id="btn-prob-link">Link acum.</button>
               </span>
@@ -313,8 +315,8 @@
             </div>
             <div id="prob-wrap" class="prob-wrap">
               <p class="prob-title" id="prob-title">
-                Probabilidade · saldo negativo (−): close em 1h/4h/8h <strong>acima</strong> do atual ·
-                saldo positivo (+): close em 1h/4h/8h <strong>abaixo</strong> do atual
+                Probabilidade · saldo negativo (−): close em 5m/15m/30m/1h <strong>acima</strong> do atual ·
+                saldo positivo (+): close em 5m/15m/30m/1h <strong>abaixo</strong> do atual
               </p>
               <p class="prob-title" id="prob-side-hint" style="margin-top:-0.15rem;color:#cbd5e1"></p>
               <div class="chart-wrap chart-wrap--prob">
@@ -396,12 +398,13 @@
       const PNF_SRC_KEY = "iq_blitz_ohlc1m_pnf_src";
       const PROB_ON_KEY = "iq_blitz_ohlc1m_prob_on";
       const PROB_LINK_KEY = "iq_blitz_ohlc1m_prob_link";
-      const PROB_LINES_KEY = "iq_blitz_ohlc1m_prob_lines";
+      const PROB_LINES_KEY = "iq_blitz_ohlc1m_prob_lines_v2";
       const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
       const PROB_HORIZONS = [
-        { key: "1h", bars: 60, color: "#22d3ee" },
-        { key: "4h", bars: 240, color: "#a78bfa" },
-        { key: "8h", bars: 480, color: "#fbbf24" },
+        { key: "5m", bars: 5, color: "#22d3ee" },
+        { key: "15m", bars: 15, color: "#a78bfa" },
+        { key: "30m", bars: 30, color: "#fbbf24" },
+        { key: "1h", bars: 60, color: "#34d399" },
       ];
       const PROB_MIN_SAMPLES = 3;
       // 1 ponto = 0.00001 (5 casas). Caixa = 100 pontos. Reversão clássica = 3 caixas.
@@ -414,14 +417,14 @@
       let activeSeries = null;
       let zeroLine = null;
       let probChart = null;
-      let probSeries = { "1h": null, "4h": null, "8h": null };
+      let probSeries = { "5m": null, "15m": null, "30m": null, "1h": null };
       let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
       if (!CHART_MODES.includes(chartMode)) chartMode = "ohlc";
       let pnfSource = localStorage.getItem(PNF_SRC_KEY) || "hl";
       if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
       let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
       let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
-      let probLinesOn = { "1h": true, "4h": true, "8h": true };
+      let probLinesOn = { "5m": true, "15m": true, "30m": true, "1h": true };
       try {
         const savedLines = JSON.parse(localStorage.getItem(PROB_LINES_KEY) || "");
         if (savedLines && typeof savedLines === "object") {
@@ -432,7 +435,7 @@
           }
         }
       } catch (_) {}
-      let lastProbLines = { "1h": [], "4h": [], "8h": [] };
+      let lastProbLines = { "5m": [], "15m": [], "30m": [], "1h": [] };
       let lastCumPoints = [];
       let probLinkBound = false;
       let syncingCharts = false;
@@ -579,7 +582,7 @@
           });
         }
         // linha 50%
-        probSeries["1h"].createPriceLine({
+        probSeries["5m"].createPriceLine({
           price: 50,
           color: "rgba(148, 163, 184, 0.7)",
           lineWidth: 1,
@@ -594,7 +597,7 @@
         for (const hz of PROB_HORIZONS) {
           if (probLinesOn[hz.key] && probSeries[hz.key]) return probSeries[hz.key];
         }
-        return probSeries["1h"];
+        return probSeries["5m"];
       }
 
       function valueAtTime(points, time) {
@@ -633,7 +636,7 @@
             const price = fromCum
               ? valueAtTime(
                   lastProbLines[
-                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "1h"
+                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "5m"
                   ],
                   param.time
                 )
@@ -773,7 +776,7 @@
        * saldo < 0 → P(close[t+h] > close[t])
        * saldo > 0 → P(close[t+h] < close[t])  (inverso)
        * saldo = 0 → P(close[t+h] > close[t])
-       * h em candles de 1m: 60 / 240 / 480 (= 1h / 4h / 8h de relógio).
+       * h em candles de 1m: 5 / 15 / 30 / 60 (= 5m / 15m / 30m / 1h).
        */
       function buildProbByScore(candles, scores, horizonBars) {
         const buckets = new Map(); // score -> {hits, n}
@@ -825,10 +828,10 @@
         ensureChart();
         ensureProbChart();
         bindProbChartLink();
-        if (!probChart || !probSeries["1h"]) return;
+        if (!probChart || !probSeries["5m"]) return;
         if (!rawCandles.length) {
           for (const hz of PROB_HORIZONS) probSeries[hz.key].setData([]);
-          lastProbLines = { "1h": [], "4h": [], "8h": [] };
+          lastProbLines = { "5m": [], "15m": [], "30m": [], "1h": [] };
           lastCumPoints = [];
           return;
         }
@@ -841,10 +844,10 @@
         if (hintEl) {
           if (lastScore > 0) {
             hintEl.textContent =
-              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (1h / 4h / 8h).`;
+              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (5m / 15m / 30m / 1h).`;
           } else if (lastScore < 0) {
             hintEl.textContent =
-              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (1h / 4h / 8h).`;
+              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (5m / 15m / 30m / 1h).`;
           } else {
             hintEl.textContent =
               "Saldo atual: 0 → linhas = % de o close futuro ficar ACIMA do atual.";
