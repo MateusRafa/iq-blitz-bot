@@ -17,6 +17,7 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 from bot.ohlc_collector import normalize_candle
 from bot.ohlc_store import (
     TABLE_1M,
+    delete_candles_since,
     fetch_candles,
     last_opened_at,
     run_retention_cleanup_1m,
@@ -196,6 +197,87 @@ class OhlcCollector1m:
             self._snap["message"] = "Parado"
             self._thread = None
         return self.status()
+
+    def resync_recent(self, minutes: int = 20) -> dict[str, Any]:
+        """Apaga os ultimos N minutos no DB e repuxa da Pocket (upsert, sem duplicar)."""
+        ok, msg = supabase_ok()
+        if not ok:
+            raise RuntimeError(msg)
+        mins = max(1, min(int(minutes), 180))
+        asset = self._asset
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(minutes=mins)).replace(
+            second=0, microsecond=0
+        )
+        self._set(
+            phase="resync",
+            message=f"Re-sync: apagando ≥ {since.strftime('%H:%M')} UTC ({mins} min)…",
+            error=None,
+        )
+        deleted = delete_candles_since(
+            asset, since, timeframe="1m", table=TABLE_1M
+        )
+        client: PocketOption | None = None
+        upserted = 0
+        try:
+            self._set(
+                message=(
+                    f"Re-sync: {deleted} apagadas — buscando Pocket "
+                    f"({mins} min)…"
+                )
+            )
+            client = self._connect()
+            period = TIMEFRAMES["1m"]
+            offset = mins * 60 + period * 10
+            fetched = self._fetch_tf(client, asset, "1m", offset)
+            cutoff = since - timedelta(seconds=period)
+            keep: list[dict[str, Any]] = []
+            for row in fetched:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(row["opened_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    keep.append(row)
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= cutoff:
+                    keep.append(row)
+            if keep:
+                upserted = upsert_candles(keep, table=TABLE_1M)
+            with self._lock:
+                self._snap["last_upsert"] = upserted
+                self._snap["total_upserted"] = int(
+                    self._snap.get("total_upserted", 0) or 0
+                ) + upserted
+                self._refresh_stored()
+            was_running = self.is_running()
+            self._set(
+                phase="fetch" if was_running else "idle",
+                message=(
+                    f"Re-sync ok: apagadas {deleted}, upsert {upserted} "
+                    f"(desde {since.strftime('%H:%M')} UTC)"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set(
+                phase="error" if not self.is_running() else "fetch",
+                error=str(exc),
+                message=f"Re-sync falhou: {exc}",
+            )
+            raise
+        finally:
+            self._close_client(client)
+        st = self.status()
+        st["resync"] = {
+            "deleted": deleted,
+            "upserted": upserted,
+            "since": since.isoformat(),
+            "minutes": mins,
+            "asset": asset,
+        }
+        return st
 
     def _set(self, **kwargs: Any) -> None:
         with self._lock:
@@ -381,6 +463,7 @@ class OhlcCollector1m:
                     self._refresh_stored()
         except Exception as exc:  # noqa: BLE001
             self._set(message=f"Reparo de buraco falhou: {exc}")
+
     def _maybe_cleanup(self, asset: str) -> None:
         try:
             result = run_retention_cleanup_1m(asset)
