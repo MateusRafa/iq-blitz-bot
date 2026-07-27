@@ -246,6 +246,60 @@ def delete_candles_before(
     return n
 
 
+def count_since(
+    asset: str,
+    since: datetime,
+    *,
+    timeframe: str = "1h",
+    table: str = TABLE,
+) -> int:
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    res = (
+        sb.table(table)
+        .select("id", count="exact")
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .gte("opened_at", since.isoformat())
+        .limit(1)
+        .execute()
+    )
+    count = getattr(res, "count", None)
+    if count is not None:
+        return int(count)
+    return 0
+
+
+def delete_candles_since(
+    asset: str,
+    since: datetime,
+    *,
+    timeframe: str = "1h",
+    table: str = TABLE,
+) -> int:
+    """Apaga velas com opened_at >= since. Retorna estimativa via count previo."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    n = count_since(asset, since, timeframe=timeframe, table=table)
+    if n <= 0:
+        return 0
+    sb = cliente_supabase()
+    assert sb is not None
+    (
+        sb.table(table)
+        .delete()
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .gte("opened_at", since.isoformat())
+        .execute()
+    )
+    return n
+
+
 def fetch_candles_range(
     asset: str,
     *,
