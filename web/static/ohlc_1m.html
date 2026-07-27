@@ -447,6 +447,10 @@
       let lastChartCount = -1;
       let lastChartFingerprint = "";
       let lastForcedChartAt = 0;
+      let lastFlatRepairAt = 0;
+      let flatRepairInFlight = false;
+      const AUTO_REPAIR_FLAT_UI = true;
+      const FLAT_REPAIR_COOLDOWN_MS = 120_000;
       let chartDataMode = null;
       let chartFittedKey = "";
       let lastMetaText = "";
@@ -1303,23 +1307,9 @@
         return Math.floor(Math.floor(ms / 1000) / 60) * 60;
       }
 
-      function fillMinuteGaps(candles, maxGapBars) {
-        const maxBars = maxGapBars == null ? 180 : maxGapBars;
-        if (!candles.length) return candles;
-        const out = [candles[0]];
-        for (let i = 1; i < candles.length; i++) {
-          const prev = out[out.length - 1];
-          const cur = candles[i];
-          const gap = Math.round((cur.time - prev.time) / 60);
-          if (gap > 1 && gap <= maxBars) {
-            const px = prev.close;
-            for (let t = prev.time + 60; t < cur.time; t += 60) {
-              out.push({ time: t, open: px, high: px, low: px, close: px });
-            }
-          }
-          out.push(cur);
-        }
-        return out;
+      function isFlatCandle(c) {
+        const range = Math.max(c.high, c.open, c.close) - Math.min(c.low, c.open, c.close);
+        return range <= 1e-12;
       }
 
       function filterPriceOutliers(candles) {
@@ -1357,8 +1347,46 @@
         }
         let series = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
         series = filterPriceOutliers(series);
-        series = fillMinuteGaps(series, 180);
+        // Nao inventa velas flat nos buracos — isso gerava os "tracos" no grafico.
+        // Buracos sao corrigidos pelo coletor (repair/resync).
         return series;
+      }
+
+      /** Velas ja fechadas no fim com O=H=L=C (dado incompleto / corrompido). */
+      function detectTrailingFlatCorruption(candles) {
+        if (!candles || candles.length < 5) return false;
+        const nowMin = Math.floor(Date.now() / 1000 / 60) * 60;
+        const closed = candles.filter((c) => c.time < nowMin);
+        const tail = closed.slice(-4);
+        if (tail.length < 2) return false;
+        let flatN = 0;
+        for (const c of tail) {
+          if (isFlatCandle(c)) flatN += 1;
+        }
+        return flatN >= 2;
+      }
+
+      async function maybeAutoRepairFlat(asset) {
+        if (!AUTO_REPAIR_FLAT_UI || flatRepairInFlight) return false;
+        if (!detectTrailingFlatCorruption(rawCandles)) return false;
+        const now = Date.now();
+        if (now - lastFlatRepairAt < FLAT_REPAIR_COOLDOWN_MS) return false;
+        lastFlatRepairAt = now;
+        flatRepairInFlight = true;
+        chartMeta.textContent =
+          (lastMetaText || "") +
+          " · Flag flat: re-sync automático dos últimos 15 min…";
+        try {
+          await api("/api/ohlc1m/resync-recent", "POST", {
+            minutes: 15,
+          });
+          return true;
+        } catch (e) {
+          console.warn("auto repair flat falhou", e);
+          return false;
+        } finally {
+          flatRepairInFlight = false;
+        }
       }
 
       function fitChartIfNeeded(forceFit) {
@@ -1443,6 +1471,11 @@
             String(last).replace("T", " ").slice(0, 16) +
             " UTC";
           applyChartData({ fit: assetChanged || force });
+          // Flag: se as velas recentes estiverem flat/corrompidas, re-puxa do DB/Pocket.
+          if (await maybeAutoRepairFlat(data.asset || asset)) {
+            lastChartFingerprint = "";
+            await loadChart(data.asset || asset, true);
+          }
         } catch (e) {
           chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
         }
