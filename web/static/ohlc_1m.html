@@ -1317,13 +1317,31 @@
         const closes = candles.map((c) => c.close).slice().sort((a, b) => a - b);
         const mid = closes[Math.floor(closes.length / 2)];
         if (!(mid > 0)) return candles;
-        // Remove velas absurdas (ex. preço ~10x fora do mediano) que "flutuam" no gráfico.
-        const lo = mid * 0.5;
-        const hi = mid * 1.5;
-        return candles.filter((c) => {
-          const vals = [c.open, c.high, c.low, c.close];
-          return vals.every((v) => v >= lo && v <= hi);
-        });
+        const ranges = candles
+          .map((c) => c.high - c.low)
+          .slice()
+          .sort((a, b) => a - b);
+        const medRange = ranges[Math.floor(ranges.length / 2)] || mid * 0.0002;
+        const band = Math.max(medRange * 6, mid * 0.00025);
+        const maxDev = mid * 0.004;
+        return candles
+          .filter((c) => {
+            // Remove so preco totalmente absurdo (nao so pavio).
+            return !(
+              Math.abs(c.close - mid) > maxDev && Math.abs(c.open - mid) > maxDev
+            );
+          })
+          .map((c) => {
+            const bodyHi = Math.max(c.open, c.close);
+            const bodyLo = Math.min(c.open, c.close);
+            return {
+              time: c.time,
+              open: c.open,
+              close: c.close,
+              high: Math.max(bodyHi, Math.min(c.high, bodyHi + band)),
+              low: Math.min(bodyLo, Math.max(c.low, bodyLo - band)),
+            };
+          });
       }
 
       function rowsToCandles(rows) {
@@ -1395,6 +1413,11 @@
         const key = lastChartAsset + "|" + chartMode;
         if (!forceFit && key === chartFittedKey) {
           resizeChart();
+          try {
+            chart.timeScale().scrollToRealTime();
+          } catch (_) {
+            /* ignore */
+          }
           return;
         }
         chartFittedKey = key;
@@ -1403,6 +1426,11 @@
         requestAnimationFrame(() => {
           resizeChart();
           chart.timeScale().fitContent();
+          try {
+            chart.timeScale().scrollToRealTime();
+          } catch (_) {
+            /* ignore */
+          }
         });
       }
 
@@ -1460,16 +1488,20 @@
             applyChartData({ fit: true });
             return;
           }
-          const first = rows[0].opened_at;
-          const last = rows[rows.length - 1].opened_at;
+          const firstC = rawCandles[0];
+          const lastC = rawCandles[rawCandles.length - 1];
+          const fmtUnix = (t) => {
+            const d = new Date(t * 1000);
+            return d.toISOString().replace("T", " ").slice(0, 16);
+          };
           lastMetaText =
             data.asset +
             " · 1m · " +
             rawCandles.length +
             " velas · " +
-            String(first).replace("T", " ").slice(0, 16) +
+            fmtUnix(firstC.time) +
             " → " +
-            String(last).replace("T", " ").slice(0, 16) +
+            fmtUnix(lastC.time) +
             " UTC";
           applyChartData({ fit: assetChanged || force });
           // Flag: se as velas recentes estiverem flat/corrompidas, re-puxa do DB/Pocket.
