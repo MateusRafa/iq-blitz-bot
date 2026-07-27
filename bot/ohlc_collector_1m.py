@@ -20,6 +20,7 @@ from bot.ohlc_store import (
     delete_candles_since,
     fetch_candles,
     last_opened_at,
+    merge_ohlc_with_existing,
     run_retention_cleanup_1m,
     retention_status_1m,
     stored_summary,
@@ -107,6 +108,8 @@ class OhlcCollector1m:
             "stored_last": None,
             "stored_err": None,
             "retention": None,
+            "auto_repair_flat": True,
+            "last_flat_repair_at": None,
         }
         self._refresh_supabase_flag()
         self._refresh_stored()
@@ -245,12 +248,18 @@ class OhlcCollector1m:
                 if ts >= cutoff:
                     keep.append(row)
             if keep:
-                upserted = upsert_candles(keep, table=TABLE_1M)
+                keep = merge_ohlc_with_existing(
+                    keep, asset=asset, timeframe="1m", table=TABLE_1M
+                )
+                upserted = upsert_candles(keep, table=TABLE_1M) if keep else 0
             with self._lock:
                 self._snap["last_upsert"] = upserted
                 self._snap["total_upserted"] = int(
                     self._snap.get("total_upserted", 0) or 0
                 ) + upserted
+                self._snap["last_flat_repair_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
                 self._refresh_stored()
             was_running = self.is_running()
             self._set(
@@ -359,6 +368,11 @@ class OhlcCollector1m:
             rows = filtered
         if not rows:
             return 0
+        rows = merge_ohlc_with_existing(
+            rows, asset=asset, timeframe=tf, table=TABLE_1M
+        )
+        if not rows:
+            return 0
         n = upsert_candles(rows, table=TABLE_1M)
         with self._lock:
             prev = int(self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0)
@@ -369,6 +383,128 @@ class OhlcCollector1m:
             ) + n
             self._refresh_stored()
         return n
+
+    def _trailing_flats_need_repair(self, asset: str) -> bool:
+        """True se >=2 velas ja fechadas no fim estao flat (O=H=L=C)."""
+        try:
+            rows = fetch_candles(
+                asset, timeframe="1m", limit=40, table=TABLE_1M
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if len(rows) < 5:
+            return False
+        now_min = datetime.now(timezone.utc).replace(
+            second=0, microsecond=0
+        )
+        closed: list[dict[str, Any]] = []
+        for r in rows:
+            raw = r.get("opened_at")
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.astimezone(timezone.utc).replace(second=0, microsecond=0)
+            if ts < now_min:
+                closed.append(r)
+        tail = closed[-4:]
+        if len(tail) < 2:
+            return False
+        flat_n = 0
+        for r in tail:
+            try:
+                o = float(r["open"])
+                h = float(r["high"])
+                lo = float(r["low"])
+                c = float(r["close"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if max(h, o, c) - min(lo, o, c) <= 1e-12:
+                flat_n += 1
+        return flat_n >= 2
+
+    def _maybe_repair_trailing_flats(
+        self, client: PocketOption | None, asset: str
+    ) -> None:
+        """Flag auto_repair_flat: se recentes flat, apaga e repuxa da Pocket."""
+        if not _env_flag_default_on("OHLC_1M_AUTO_REPAIR_FLAT", "1"):
+            with self._lock:
+                self._snap["auto_repair_flat"] = False
+            return
+        with self._lock:
+            self._snap["auto_repair_flat"] = True
+            last_at = self._snap.get("last_flat_repair_at")
+        # Cooldown 2 min para nao loop de resync.
+        if last_at:
+            try:
+                prev = datetime.fromisoformat(
+                    str(last_at).replace("Z", "+00:00")
+                )
+                if prev.tzinfo is None:
+                    prev = prev.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - prev).total_seconds() < 120:
+                    return
+            except ValueError:
+                pass
+        if not self._trailing_flats_need_repair(asset):
+            return
+        self._set(
+            message="Flag flat: velas recentes invalidas — re-sync 15 min…",
+            phase="repair_flat",
+        )
+        own_client = client is None
+        use = client
+        try:
+            if use is None:
+                use = self._connect()
+            # Apaga so a ponta corrompida e repuxa (upsert + merge).
+            since = (
+                datetime.now(timezone.utc) - timedelta(minutes=15)
+            ).replace(second=0, microsecond=0)
+            deleted = delete_candles_since(
+                asset, since, timeframe="1m", table=TABLE_1M
+            )
+            period = TIMEFRAMES["1m"]
+            offset = 15 * 60 + period * 10
+            fetched = self._fetch_tf(use, asset, "1m", offset)
+            cutoff = since - timedelta(seconds=period)
+            keep: list[dict[str, Any]] = []
+            for row in fetched:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(row["opened_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    keep.append(row)
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= cutoff:
+                    keep.append(row)
+            keep = merge_ohlc_with_existing(
+                keep, asset=asset, timeframe="1m", table=TABLE_1M
+            )
+            n = upsert_candles(keep, table=TABLE_1M) if keep else 0
+            with self._lock:
+                self._snap["last_flat_repair_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                self._refresh_stored()
+            self._set(
+                message=(
+                    f"Flag flat: reparado (apagadas {deleted}, upsert {n})"
+                ),
+                phase="fetch",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set(message=f"Flag flat: reparo falhou: {exc}")
+        finally:
+            if own_client:
+                self._close_client(use)
 
     def _catchup_if_lagging(
         self, client: PocketOption, asset: str
@@ -457,7 +593,10 @@ class OhlcCollector1m:
                 if ts >= cutoff:
                     keep.append(row)
             if keep:
-                n = upsert_candles(keep, table=TABLE_1M)
+                keep = merge_ohlc_with_existing(
+                    keep, asset=asset, timeframe="1m", table=TABLE_1M
+                )
+                n = upsert_candles(keep, table=TABLE_1M) if keep else 0
                 self._set(message=f"Buraco 1m reparado: {n} velas upsert")
                 with self._lock:
                     self._refresh_stored()
@@ -563,6 +702,7 @@ class OhlcCollector1m:
             self._maybe_cleanup(asset)
             if client is not None:
                 self._repair_internal_gaps(client, asset)
+                self._maybe_repair_trailing_flats(client, asset)
             # Mantem a conexao aberta no loop de 30s (reconecta so se cair).
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
@@ -611,6 +751,7 @@ class OhlcCollector1m:
                                     client, asset, tf, backfill=False
                                 )
                     self._repair_internal_gaps(client, asset)
+                    self._maybe_repair_trailing_flats(client, asset)
                     # Limpeza so de vez em quando (a cada ~10 min de uptime).
                     if int(time.time()) % 600 < 35:
                         self._maybe_cleanup(asset)
