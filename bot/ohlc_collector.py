@@ -108,6 +108,12 @@ def normalize_candle(
     c = _f(raw, "close", "Close", "c")
     if ts is None or o is None or h is None or lo is None or c is None:
         return None
+    # Sanitiza OHLC (evita pavios inconsistentes / outliers de API).
+    h = max(h, o, c)
+    lo = min(lo, o, c)
+    # Timeframe 1m: alinha opened_at ao minuto UTC.
+    if timeframe == "1m":
+        ts = (ts // 60) * 60
     vol = _f(raw, "volume", "Volume", "v")
     opened = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     row: dict[str, Any] = {
