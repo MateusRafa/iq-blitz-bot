@@ -254,6 +254,9 @@
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
               <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
+              <button type="button" class="btn btn-apply" id="btn-pull-now" title="Puxa histórico como na 1ª sync (só fechadas, sem duplicar)">
+                Puxar agora
+              </button>
               <button type="button" class="btn" id="btn-resync-20" title="Apaga os últimos 20 min no DB e repuxa da Pocket (sem duplicar)">
                 Re-sync 20 min
               </button>
@@ -1713,6 +1716,27 @@
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-pull-now").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          const btn = document.getElementById("btn-pull-now");
+          btn.disabled = true;
+          const st = await api("/api/ohlc1m/pull-now", "POST", {});
+          render(st);
+          await loadChart(st.asset || assetInput.value.trim(), true);
+          const p = st.pull || {};
+          if (p.upserted === 0) {
+            setCmdErro(
+              "Puxada ok, mas 0 velas. Confira SSID/ativo ou tente de novo."
+            );
+          }
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        } finally {
+          document.getElementById("btn-pull-now").disabled = false;
         }
       });
 
