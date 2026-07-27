@@ -90,6 +90,56 @@ def filter_closed_candles(
     return keep
 
 
+def _candle_body(row: dict[str, Any]) -> float:
+    try:
+        return abs(float(row["close"]) - float(row["open"]))
+    except (TypeError, ValueError, KeyError):
+        return 0.0
+
+
+def _candle_range(row: dict[str, Any]) -> float:
+    try:
+        return float(row["high"]) - float(row["low"])
+    except (TypeError, ValueError, KeyError):
+        return 0.0
+
+
+def _prefer_better_candle(
+    a: dict[str, Any], b: dict[str, Any]
+) -> dict[str, Any]:
+    """Escolhe OHLC com corpo real (como na Pocket) em vez de traco O=C.
+
+    Amplia high/low entre as duas fontes; open/close vêm da fonte com maior corpo.
+    Ignora pavio de fonte bodyless se o range for absurdo vs a fonte com corpo.
+    """
+    body_a = _candle_body(a)
+    body_b = _candle_body(b)
+    # Prefere quem tem corpo; se empatar, maior range; se empatar, A (estavel).
+    if body_b > body_a + 1e-12:
+        base, other = b, a
+    elif body_a > body_b + 1e-12:
+        base, other = a, b
+    elif _candle_range(b) > _candle_range(a) + 1e-12:
+        base, other = b, a
+    else:
+        base, other = a, b
+    out = dict(base)
+    try:
+        # Nao misturar pavio gigante de um "traco" O=C em cima de vela com corpo.
+        other_body = _candle_body(other)
+        other_range = _candle_range(other)
+        base_range = max(_candle_range(base), 1e-12)
+        if other_body <= 1e-12 and other_range > base_range * 3:
+            return out
+        out["high"] = max(float(base["high"]), float(other["high"]))
+        out["low"] = min(float(base["low"]), float(other["low"]))
+        out["high"] = max(out["high"], float(out["open"]), float(out["close"]))
+        out["low"] = min(out["low"], float(out["open"]), float(out["close"]))
+    except (TypeError, ValueError, KeyError):
+        pass
+    return out
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -463,8 +513,16 @@ class OhlcCollector1m:
                     timeframe=tf,
                     time_offset=use_offset,
                 )
-                if norm:
-                    by_key[str(norm["opened_at"])] = norm
+                if not norm:
+                    continue
+                key = str(norm["opened_at"])
+                prev = by_key.get(key)
+                if prev is None:
+                    by_key[key] = norm
+                    continue
+                # Varias fontes no mesmo minuto: NAO sobrescrever um corpo bom
+                # com um "traco" (O=C) de outra fonte — era o bug vs Pocket.
+                by_key[key] = _prefer_better_candle(prev, norm)
         rows = list(by_key.values())
         rows.sort(key=lambda r: str(r.get("opened_at") or ""))
         return rows
@@ -513,8 +571,8 @@ class OhlcCollector1m:
         rows = filter_closed_candles(rows, period)
         if not rows:
             return 0
-        # Substitui OHLC do Pocket (sem merge que amplia spike antigo).
         rows = sanitize_ohlc_spikes(rows)
+        rows = self._reconcile_prefer_body(rows, asset, tf)
         if not rows:
             return 0
         n = upsert_candles(rows, table=TABLE_1M)
@@ -528,6 +586,42 @@ class OhlcCollector1m:
             ) + n
             self._refresh_stored()
         return n
+
+    def _reconcile_prefer_body(
+        self, rows: list[dict[str, Any]], asset: str, tf: str
+    ) -> list[dict[str, Any]]:
+        """Nao deixa upsert bodyless apagar vela com corpo ja salva (e vice-versa)."""
+        if not rows:
+            return []
+        try:
+            recent = fetch_candles(
+                asset, timeframe=tf, limit=max(180, len(rows) + 30), table=TABLE_1M
+            )
+        except Exception:  # noqa: BLE001
+            return rows
+        by_old: dict[str, dict[str, Any]] = {}
+        for r in recent:
+            raw = r.get("opened_at")
+            if raw:
+                by_old[str(raw)[:19]] = {
+                    "asset": asset,
+                    "timeframe": tf,
+                    "opened_at": r.get("opened_at"),
+                    "open": r.get("open"),
+                    "high": r.get("high"),
+                    "low": r.get("low"),
+                    "close": r.get("close"),
+                    "source": "pocket",
+                }
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            key = str(row.get("opened_at") or "")[:19]
+            old = by_old.get(key)
+            if old is None:
+                out.append(row)
+            else:
+                out.append(_prefer_better_candle(old, row))
+        return out
 
     def _purge_forming_candle(self, asset: str, tf: str) -> None:
         """Remove do DB o minuto ainda aberto (lixo de ticks incompletos)."""
