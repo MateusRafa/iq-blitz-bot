@@ -17,6 +17,7 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 from bot.ohlc_collector import normalize_candle
 from bot.ohlc_store import (
     TABLE_1M,
+    fetch_candles,
     last_opened_at,
     run_retention_cleanup_1m,
     retention_status_1m,
@@ -35,9 +36,9 @@ BACKFILL_OFFSET: dict[str, int] = {
     "1m": 7 * 86400,
 }
 
-# No loop: ate ~3h recentes.
+# No loop: janela ampla para tapar buracos apos queda/reconexao.
 LIVE_OFFSET: dict[str, int] = {
-    "1m": 3600 * 3,
+    "1m": 3600 * 6,
 }
 
 
@@ -211,10 +212,12 @@ class OhlcCollector1m:
         if last is None:
             return default
         now = datetime.now(timezone.utc)
-        gap = int((now - last).total_seconds()) + period * 5
+        # Sempre cobre do ultimo salvo ate agora + folga (tapa buracos).
+        gap = int((now - last).total_seconds()) + period * 10
         if backfill:
-            return max(gap, period * 5)
-        return max(min(gap, default), period * 3)
+            return max(gap, default, period * 10)
+        # Live: no minimo 30 min, no maximo LIVE_OFFSET, mas nunca menos que o gap.
+        return max(min(max(gap, period * 30), default), period * 5)
 
     def _fetch_tf(
         self, client: PocketOption, asset: str, tf: str, offset: int
@@ -248,9 +251,16 @@ class OhlcCollector1m:
             last = last_opened_at(asset, tf, table=TABLE_1M)
         except Exception:  # noqa: BLE001
             last = None
+        now = datetime.now(timezone.utc)
+        period = TIMEFRAMES[tf]
+        # Se o banco esta atrasado >2 min, NAO descarte o meio da janela —
+        # precisamos regravar o buraco inteiro ate o presente.
         if last is not None:
-            period = TIMEFRAMES[tf]
-            cutoff = last - timedelta(seconds=period * 2)
+            lag = (now - last).total_seconds()
+            if lag > period * 2 or backfill:
+                cutoff = last - timedelta(seconds=period * 5)
+            else:
+                cutoff = last - timedelta(seconds=period * 2)
             filtered: list[dict[str, Any]] = []
             for row in rows:
                 try:
@@ -278,6 +288,99 @@ class OhlcCollector1m:
             self._refresh_stored()
         return n
 
+    def _catchup_if_lagging(
+        self, client: PocketOption, asset: str
+    ) -> None:
+        """Se o ultimo candle esta velho, forca backfill da janela em atraso."""
+        try:
+            last = last_opened_at(asset, "1m", table=TABLE_1M)
+        except Exception:  # noqa: BLE001
+            return
+        if last is None:
+            return
+        lag = (datetime.now(timezone.utc) - last).total_seconds()
+        if lag <= 90:
+            return
+        self._set(
+            message=f"Catch-up 1m: atraso de ~{int(lag)}s — repondo buracos…",
+            phase="catchup",
+        )
+        self._upsert_tf(client, asset, "1m", backfill=True)
+
+    def _repair_internal_gaps(
+        self, client: PocketOption, asset: str
+    ) -> None:
+        """Detecta buracos no meio do historico recente e puxa de novo da Pocket."""
+        try:
+            rows = fetch_candles(
+                asset, timeframe="1m", limit=360, table=TABLE_1M
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if len(rows) < 3:
+            return
+        times: list[datetime] = []
+        for r in rows:
+            raw = r.get("opened_at")
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            times.append(ts)
+        if len(times) < 3:
+            return
+        times.sort()
+        period = TIMEFRAMES["1m"]
+        worst_gap = 0
+        gap_from: datetime | None = None
+        for i in range(1, len(times)):
+            gap = int((times[i] - times[i - 1]).total_seconds())
+            if gap > period * 2 and gap > worst_gap:
+                worst_gap = gap
+                gap_from = times[i - 1]
+        if worst_gap <= period * 2 or gap_from is None:
+            return
+        # Offset: do inicio do buraco ate agora (+folga).
+        now = datetime.now(timezone.utc)
+        offset = int((now - gap_from).total_seconds()) + period * 5
+        offset = max(offset, period * 30)
+        self._set(
+            message=(
+                f"Reparando buraco 1m de ~{worst_gap // 60} min "
+                f"(desde {gap_from.strftime('%H:%M')} UTC)…"
+            ),
+            phase="repair",
+        )
+        try:
+            fetched = self._fetch_tf(client, asset, "1m", offset)
+            if not fetched:
+                return
+            # Aceita tudo a partir do inicio do buraco (sem filtro no "last").
+            cutoff = gap_from - timedelta(seconds=period)
+            keep: list[dict[str, Any]] = []
+            for row in fetched:
+                try:
+                    ts = datetime.fromisoformat(
+                        str(row["opened_at"]).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    keep.append(row)
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= cutoff:
+                    keep.append(row)
+            if keep:
+                n = upsert_candles(keep, table=TABLE_1M)
+                self._set(message=f"Buraco 1m reparado: {n} velas upsert")
+                with self._lock:
+                    self._refresh_stored()
+        except Exception as exc:  # noqa: BLE001
+            self._set(message=f"Reparo de buraco falhou: {exc}")
     def _maybe_cleanup(self, asset: str) -> None:
         try:
             result = run_retention_cleanup_1m(asset)
@@ -375,6 +478,8 @@ class OhlcCollector1m:
                     self._set(message=f"Sync {tf} falhou: {exc}")
 
             self._maybe_cleanup(asset)
+            if client is not None:
+                self._repair_internal_gaps(client, asset)
             # Mantem a conexao aberta no loop de 30s (reconecta so se cair).
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
@@ -388,6 +493,8 @@ class OhlcCollector1m:
                     )
                     if client is None:
                         client = self._connect()
+                    self._catchup_if_lagging(client, asset)
+                    self._repair_internal_gaps(client, asset)
                     for tf in TIMEFRAMES:
                         if self._stop.is_set():
                             break
@@ -420,6 +527,7 @@ class OhlcCollector1m:
                                 self._upsert_tf(
                                     client, asset, tf, backfill=False
                                 )
+                    self._repair_internal_gaps(client, asset)
                     # Limpeza so de vez em quando (a cada ~10 min de uptime).
                     if int(time.time()) % 600 < 35:
                         self._maybe_cleanup(asset)
