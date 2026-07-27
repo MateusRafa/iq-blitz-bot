@@ -39,10 +39,13 @@ BACKFILL_OFFSET: dict[str, int] = {
     "1m": 7 * 86400,
 }
 
-# No loop: janela ampla para tapar buracos apos queda/reconexao.
+# No loop live: janela curta (~30 min) — fetch a cada 5 min so grava velas fechadas.
 LIVE_OFFSET: dict[str, int] = {
-    "1m": 3600 * 6,
+    "1m": 30 * 60,
 }
+
+# Intervalo padrao entre fetches no loop (5 minutos = 5 velas 1m fechadas).
+DEFAULT_POLL_SECONDS = 5 * 60
 
 
 def _parse_row_opened(row: dict[str, Any]) -> datetime | None:
@@ -167,6 +170,26 @@ def seconds_until_next_minute_fetch(*, after_minute_seconds: int) -> float:
     return max(wait, 1.0)
 
 
+def seconds_until_next_interval_fetch(
+    *, interval_seconds: int, after_seconds: int
+) -> float:
+    """Segundos ate o proximo multiplo do intervalo UTC + folga pos-fechamento.
+
+    Ex.: interval=300 → :00, :05, :10… + after_seconds (vela do bloco ja fechada).
+    """
+    interval = max(int(interval_seconds), 60)
+    after = max(int(after_seconds), 0)
+    now = datetime.now(timezone.utc)
+    epoch = int(now.timestamp())
+    # Proximo boundary estritamente no futuro.
+    nxt = ((epoch // interval) + 1) * interval
+    target = datetime.fromtimestamp(nxt, tz=timezone.utc) + timedelta(
+        seconds=after
+    )
+    wait = (target - now).total_seconds()
+    return max(wait, 1.0)
+
+
 def _default_asset() -> str:
     return normalize_asset(
         os.environ.get("OHLC_1M_ASSET", "").strip()
@@ -195,7 +218,7 @@ class OhlcCollector1m:
             "last_upsert": 0,
             "total_upserted": 0,
             "next_fetch_at": None,
-            "poll_mode": "minutely",
+            "poll_mode": "every_5m",
             "per_tf": {tf: {"ok": 0, "err": None} for tf in TIMEFRAMES},
             "error": None,
             "updated_at": None,
@@ -403,8 +426,8 @@ class OhlcCollector1m:
         gap = int((now - last).total_seconds()) + period * 10
         if backfill:
             return max(gap, default, period * 10)
-        # Live: no minimo 30 min, no maximo LIVE_OFFSET, mas nunca menos que o gap.
-        return max(min(max(gap, period * 30), default), period * 5)
+        # Live: cobre pelo menos o bloco de 5 min + folga; no maximo LIVE_OFFSET.
+        return max(min(max(gap, period * 10), default), period * 5)
 
     def _as_candle_list(self, raw: Any) -> list[dict[str, Any]]:
         if raw is None:
@@ -893,17 +916,25 @@ class OhlcCollector1m:
             time.sleep(min(left, 1.0))
 
     def _wait_for_next_cycle(self) -> None:
-        # Padrao: 1 fetch por minuto UTC, ~8s apos o fechamento da vela.
-        # (Poll a cada 30s no meio do minuto gravava OHLC incompleto = bug na ponta.)
-        # OHLC_1M_ALIGN_MINUTE=0 volta ao poll por intervalo (OHLC_1M_POLL_SECONDS).
-        align_raw = os.environ.get("OHLC_1M_ALIGN_MINUTE", "1").strip().lower()
+        # Padrao: a cada 5 minutos UTC (:00,:05,:10…), ~10s apos o boundary.
+        # Puxa ~5 velas 1m ja fechadas; a vela aberta no momento nunca e gravada
+        # (OHLC_1M_CLOSED_ONLY + purge do minuto atual).
+        poll = max(_env_int("OHLC_1M_POLL_SECONDS", DEFAULT_POLL_SECONDS), 60)
+        after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 10)
+        align_raw = os.environ.get("OHLC_1M_ALIGN_INTERVAL", "1").strip().lower()
         align = align_raw not in ("0", "false", "no")
-        after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 8)
-        if align:
+        # Legado: OHLC_1M_ALIGN_MINUTE=1 forçava 1 min; agora so se POLL=60.
+        legacy = os.environ.get("OHLC_1M_ALIGN_MINUTE", "").strip().lower()
+        if legacy in ("1", "true", "yes") and poll <= 60:
             wait = seconds_until_next_minute_fetch(after_minute_seconds=after)
             mode = "minutely"
+        elif align:
+            wait = seconds_until_next_interval_fetch(
+                interval_seconds=poll, after_seconds=after
+            )
+            mode = f"every_{poll // 60}m" if poll % 60 == 0 else f"every_{poll}s"
         else:
-            wait = float(max(_env_int("OHLC_1M_POLL_SECONDS", 60), 30))
+            wait = float(poll)
             mode = "poll"
         next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
         self._set(
@@ -911,8 +942,9 @@ class OhlcCollector1m:
             poll_mode=mode,
             next_fetch_at=next_at.isoformat(),
             message=(
-                f"Proximo fetch 1m em ~{int(wait)}s "
-                f"({next_at.strftime('%H:%M:%S')} UTC, so velas fechadas)"
+                f"Proximo fetch em ~{int(wait)}s "
+                f"({next_at.strftime('%H:%M:%S')} UTC) — "
+                f"bloco ~{poll // 60}m, so velas 1m fechadas"
             ),
         )
         self._sleep_interruptible(wait)
