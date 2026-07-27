@@ -256,6 +256,7 @@ class OhlcCollector1m:
             "auto_repair_flat": True,
             "last_flat_repair_at": None,
         }
+        self._pull_lock = threading.Lock()
         self._refresh_supabase_flag()
         self._refresh_stored()
 
@@ -345,6 +346,52 @@ class OhlcCollector1m:
             self._snap["message"] = "Parado"
             self._thread = None
         return self.status()
+
+    def pull_now(self) -> dict[str, Any]:
+        """Puxada manual igual a 1a sync: get_candles, so fechadas, upsert sem duplicar."""
+        ok, msg = supabase_ok()
+        if not ok:
+            raise RuntimeError(msg)
+        if not self._pull_lock.acquire(blocking=False):
+            raise RuntimeError("Ja existe uma puxada manual em andamento.")
+        client: PocketOption | None = None
+        upserted = 0
+        asset = self._asset
+        try:
+            self._set(
+                phase="manual_pull",
+                message="Puxada manual (igual 1a sync / coletor 1h)…",
+                error=None,
+            )
+            client = self._connect()
+            upserted = self._upsert_tf(
+                client, asset, "1m", backfill=True, full_history=True
+            )
+            was_running = self.is_running()
+            self._set(
+                phase="fetch" if was_running else "idle",
+                message=(
+                    f"Puxada manual ok: {upserted} velas upsert "
+                    f"(fechadas; sem duplicar no DB)"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set(
+                phase="error" if not self.is_running() else "fetch",
+                error=str(exc),
+                message=f"Puxada manual falhou: {exc}",
+            )
+            raise
+        finally:
+            self._close_client(client)
+            self._pull_lock.release()
+        st = self.status()
+        st["pull"] = {
+            "upserted": upserted,
+            "asset": asset,
+            "mode": "first_pull",
+        }
+        return st
 
     def resync_recent(self, minutes: int = 20) -> dict[str, Any]:
         """Apaga os ultimos N minutos no DB e repuxa da Pocket (upsert, sem duplicar)."""
@@ -551,8 +598,12 @@ class OhlcCollector1m:
         tf: str,
         *,
         backfill: bool = False,
+        full_history: bool = False,
     ) -> int:
-        offset = self._offset_for_tf(asset, tf, backfill=backfill)
+        if full_history:
+            offset = BACKFILL_OFFSET[tf]
+        else:
+            offset = self._offset_for_tf(asset, tf, backfill=backfill)
         rows = self._fetch_tf(client, asset, tf, offset)
         if not rows:
             return 0
@@ -562,9 +613,9 @@ class OhlcCollector1m:
             last = None
         now = datetime.now(timezone.utc)
         period = TIMEFRAMES[tf]
-        # Se o banco esta atrasado >2 min, NAO descarte o meio da janela —
-        # precisamos regravar o buraco inteiro ate o presente.
-        if last is not None:
+        # full_history (botao Puxar agora): aceita toda a janela fechada.
+        # Senao, se ja ha historico, so reenvia a ponta.
+        if last is not None and not full_history:
             lag = (now - last).total_seconds()
             if lag > period * 2 or backfill:
                 cutoff = last - timedelta(seconds=period * 5)
