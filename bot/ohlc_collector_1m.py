@@ -159,6 +159,7 @@ def _prefer_better_candle(
         other_range = _candle_range(other)
         base_range = max(_candle_range(base), 1e-12)
         if other_body <= 1e-12 and other_range > base_range * 3:
+            out["updated_at"] = datetime.now(timezone.utc).isoformat()
             return out
         out["high"] = max(float(base["high"]), float(other["high"]))
         out["low"] = min(float(base["low"]), float(other["low"]))
@@ -166,6 +167,9 @@ def _prefer_better_candle(
         out["low"] = min(out["low"], float(out["open"]), float(out["close"]))
     except (TypeError, ValueError, KeyError):
         pass
+    out["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if "source" not in out:
+        out["source"] = "pocket"
     return out
 
 
