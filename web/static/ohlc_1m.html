@@ -1347,8 +1347,9 @@
         }
         let series = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
         series = filterPriceOutliers(series);
-        // Nao inventa velas flat nos buracos — isso gerava os "tracos" no grafico.
-        // Buracos sao corrigidos pelo coletor (repair/resync).
+        // Esconde o minuto ainda aberto (OHLC incompleto na ponta do grafico).
+        const nowMin = Math.floor(Date.now() / 1000 / 60) * 60;
+        series = series.filter((c) => c.time < nowMin);
         return series;
       }
 
@@ -1618,10 +1619,9 @@
         render(st);
         const running = !!st.running;
         const now = Date.now();
-        // Com coletor ligado: forca redesenho do grafico no maximo a cada 30s
-        // (alem da deteccao por fingerprint da ultima vela).
+        // Com coletor ligado: redesenha no maximo a cada 60s (vela fecha 1x/min).
         const forceChart =
-          running && now - lastForcedChartAt >= 30_000;
+          running && now - lastForcedChartAt >= 60_000;
         if (forceChart) lastForcedChartAt = now;
         await loadChart(st.asset || assetInput.value.trim(), forceChart);
         return st;
