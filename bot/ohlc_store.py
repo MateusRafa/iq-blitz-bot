@@ -92,6 +92,104 @@ def upsert_candles(
     return total
 
 
+def _opened_key(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).replace("Z", "+00:00")
+    try:
+        ts = datetime.fromisoformat(s)
+    except ValueError:
+        return s[:19] if s else None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    ts = ts.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    return ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _is_flat_ohlc(o: float, h: float, lo: float, c: float) -> bool:
+    return max(h, o, c) - min(lo, o, c) <= 1e-12
+
+
+def merge_ohlc_with_existing(
+    rows: list[dict[str, Any]],
+    *,
+    asset: str,
+    timeframe: str,
+    table: str = TABLE,
+    lookback: int = 180,
+) -> list[dict[str, Any]]:
+    """Mescla com OHLC ja salvo: nao deixa tick incompleto (flat) apagar pavio bom.
+
+    - Mantem open da primeira gravacao do minuto
+    - high = max, low = min
+    - close = mais recente
+    - Nao insere vela ja fechada e flat se ainda nao existe no DB
+    """
+    if not rows:
+        return []
+    try:
+        recent = fetch_candles(
+            asset, timeframe=timeframe, limit=lookback, table=table
+        )
+    except Exception:  # noqa: BLE001
+        recent = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for r in recent:
+        k = _opened_key(r.get("opened_at"))
+        if k:
+            by_key[k] = r
+
+    now = datetime.now(timezone.utc)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = _opened_key(row.get("opened_at"))
+        if not key:
+            out.append(row)
+            continue
+        try:
+            o = float(row["open"])
+            h = float(row["high"])
+            lo = float(row["low"])
+            c = float(row["close"])
+        except (TypeError, ValueError, KeyError):
+            out.append(row)
+            continue
+        h = max(h, o, c)
+        lo = min(lo, o, c)
+        old = by_key.get(key)
+        if old is None:
+            # Evita gravar "traco" (O=H=L=C) de minuto ja fechado — API incompleta.
+            try:
+                ts = datetime.fromisoformat(key).replace(tzinfo=timezone.utc)
+            except ValueError:
+                ts = None
+            age = (now - ts).total_seconds() if ts else 0
+            if age > 90 and _is_flat_ohlc(o, h, lo, c):
+                continue
+            merged = dict(row)
+            merged["high"] = h
+            merged["low"] = lo
+            out.append(merged)
+            continue
+        try:
+            oo = float(old["open"])
+            oh = float(old["high"])
+            ol = float(old["low"])
+        except (TypeError, ValueError, KeyError):
+            merged = dict(row)
+            merged["high"] = h
+            merged["low"] = lo
+            out.append(merged)
+            continue
+        merged = dict(row)
+        merged["open"] = oo
+        merged["high"] = max(oh, h, oo, c)
+        merged["low"] = min(ol, lo, oo, c)
+        merged["close"] = c
+        out.append(merged)
+    return out
+
+
 def count_candles(
     asset: str, timeframe: str = "1h", *, table: str = TABLE
 ) -> int:
