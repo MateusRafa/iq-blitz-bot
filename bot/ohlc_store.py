@@ -80,9 +80,20 @@ def upsert_candles(
         raise RuntimeError(msg)
     sb = cliente_supabase()
     assert sb is not None
+    now_iso = datetime.now(timezone.utc).isoformat()
     total = 0
     for i in range(0, len(rows), UPSERT_CHUNK):
-        chunk = rows[i : i + UPSERT_CHUNK]
+        chunk = []
+        for row in rows[i : i + UPSERT_CHUNK]:
+            item = dict(row)
+            # Garante NOT NULL updated_at (reconcile/prefer_body pode omitir).
+            if not item.get("updated_at"):
+                item["updated_at"] = now_iso
+            # volume null quebra se a coluna for NOT NULL em algum schema antigo;
+            # na 1m e nullable — remove chave se None para o default do DB.
+            if item.get("volume") is None:
+                item.pop("volume", None)
+            chunk.append(item)
         (
             sb.table(table)
             .upsert(chunk, on_conflict="asset,timeframe,opened_at")
