@@ -255,6 +255,9 @@
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
               <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
+              <button type="button" class="btn" id="btn-resync-20" title="Apaga os últimos 20 min no DB e repuxa da Pocket (sem duplicar)">
+                Re-sync 20 min
+              </button>
               <button type="button" class="btn" id="btn-export-csv">Export CSV</button>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
@@ -1633,6 +1636,28 @@
           const st = await api("/api/ohlc1m/stop", "POST");
           render(st);
           await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-resync-20").addEventListener("click", async () => {
+        if (
+          !confirm(
+            "Apagar os últimos 20 minutos no Supabase e recarregar da Pocket?\n" +
+              "Dados mais antigos permanecem; o upsert não duplica."
+          )
+        ) {
+          return;
+        }
+        try {
+          setCmdErro("");
+          const st = await api("/api/ohlc1m/resync-recent", "POST", {
+            minutes: 20,
+          });
+          render(st);
+          await loadChart(st.asset || assetInput.value.trim(), true);
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
