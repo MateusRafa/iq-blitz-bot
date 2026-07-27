@@ -10,8 +10,11 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from BinaryOptionsToolsV2.pocketoption import PocketOption
 
@@ -30,6 +33,8 @@ from bot.ohlc_store import (
 )
 from bot.runner import is_connection_error, load_ssid, normalize_asset
 
+T = TypeVar("T")
+
 TIMEFRAMES: dict[str, int] = {
     "1m": 60,
 }
@@ -46,6 +51,27 @@ LIVE_OFFSET: dict[str, int] = {
 
 # Intervalo padrao entre fetches no loop (5 minutos = 5 velas 1m fechadas).
 DEFAULT_POLL_SECONDS = 5 * 60
+
+
+def _call_with_timeout(
+    fn: Callable[[], T], *, timeout: float, default: T, label: str = ""
+) -> T:
+    """Evita travar o coletor se a Pocket nao responder."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(fn)
+        try:
+            return fut.result(timeout=max(timeout, 1.0))
+        except FuturesTimeout:
+            if label:
+                print(f"[ohlc_1m] timeout {timeout:.0f}s: {label}", flush=True)
+            return default
+        except Exception as exc:  # noqa: BLE001
+            if label:
+                print(f"[ohlc_1m] erro {label}: {exc}", flush=True)
+            return default
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _parse_row_opened(row: dict[str, Any]) -> datetime | None:
@@ -450,81 +476,99 @@ class OhlcCollector1m:
     def _fetch_tf(
         self, client: PocketOption, asset: str, tf: str, offset: int
     ) -> list[dict[str, Any]]:
-        """Historico limpo da Pocket — evita get_candles()/live (max_rows=100 + ticks).
+        """Historico Pocket com timeout — history primeiro (rapido), depois advanced.
 
-        get_candles() na BinaryOptionsToolsV2 chama get_candles_live com max_rows=100
-        e mescla ticks no OHLC, gerando pavios/flats errados. Aqui usamos
-        get_candles_advanced + history + compile_candles (como a propria lib no seed).
+        Evita get_candles_live (trava em subscribe de ticks).
         """
         period = TIMEFRAMES[tf]
         offset = int(offset)
-        # Mesmo offset da lib (Pocket platform time ≈ UTC+2).
         platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
         platform_time = int(time.time()) + platform_offset
+        api_timeout = float(_env_int("OHLC_1M_API_TIMEOUT", 20))
 
-        def _pull_sources(off: int, ref_time: int) -> list[list[dict[str, Any]]]:
-            groups: list[list[dict[str, Any]]] = []
-            try:
-                groups.append(
-                    self._as_candle_list(
-                        client.get_candles_advanced(
-                            asset, period, off, ref_time
-                        )
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                groups.append(
-                    self._as_candle_list(client.history(asset, period))
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                groups.append(
-                    self._as_candle_list(
-                        client.compile_candles(asset, period, off)
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return groups
+        groups: list[tuple[list[dict[str, Any]], bool]] = []
+        # bool = precisa aplicar platform_offset no normalize
 
-        groups = _pull_sources(offset, platform_time)
+        # 1) history — costuma ser a chamada mais leve.
+        self._set(message=f"Pocket history({asset}, {period})…")
+        hist = _call_with_timeout(
+            lambda: self._as_candle_list(client.history(asset, period)),
+            timeout=api_timeout,
+            default=[],
+            label="history",
+        )
+        if hist:
+            groups.append((hist, True))
 
-        # Fallback: live com max_rows alto (time ja vem ajustado — sem offset).
-        live_adjusted = False
-        if not any(groups):
-            hours = max(0.1, min(offset / 3600.0, 48.0))
-            max_rows = min(max(int(hours * 3600) // period + 20, 300), 5000)
-            it = None
-            try:
-                self._set(
-                    message=(
-                        f"Fallback live 1m (~{hours:.1f}h, max {max_rows})…"
-                    )
+        # 2) advanced — janela pedida (limitada para nao travar).
+        off = min(offset, 6 * 3600) if offset > 6 * 3600 else offset
+        # Se ja temos history e so precisamos de pouco, ainda tenta advanced curto.
+        self._set(
+            message=f"Pocket advanced({asset}, off={off}s)…"
+        )
+        adv = _call_with_timeout(
+            lambda: self._as_candle_list(
+                client.get_candles_advanced(
+                    asset, period, off, platform_time
                 )
+            ),
+            timeout=api_timeout,
+            default=[],
+            label="advanced",
+        )
+        if adv:
+            groups.append((adv, True))
+
+        # 3) compile — opcional, so se ainda vazio.
+        if not groups:
+            self._set(message=f"Pocket compile({asset})…")
+            compiled = _call_with_timeout(
+                lambda: self._as_candle_list(
+                    client.compile_candles(asset, period, off)
+                ),
+                timeout=api_timeout,
+                default=[],
+                label="compile",
+            )
+            if compiled:
+                groups.append((compiled, True))
+
+        # 4) live so se habilitado (padrao OFF — trava com frequencia).
+        if not groups and _env_flag_default_on(
+            "OHLC_1M_ALLOW_LIVE_FALLBACK", "0"
+        ):
+            hours = max(0.1, min(offset / 3600.0, 6.0))
+            max_rows = min(max(int(hours * 3600) // period + 20, 120), 2000)
+            self._set(
+                message=f"Fallback live 1m (~{hours:.1f}h)…"
+            )
+
+            def _live() -> list[dict[str, Any]]:
                 it = client.get_candles_live(
                     asset, period, hours=hours, max_rows=max_rows
                 )
-                closed, _forming = next(it)
-                groups.append(self._as_candle_list(closed))
-                live_adjusted = True
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                if it is not None:
+                try:
+                    closed, _forming = next(it)
+                    return self._as_candle_list(closed)
+                finally:
                     try:
                         it.close()  # type: ignore[attr-defined]
                     except Exception:  # noqa: BLE001
                         pass
 
+            live_rows = _call_with_timeout(
+                _live,
+                timeout=max(api_timeout, 30.0),
+                default=[],
+                label="live",
+            )
+            if live_rows:
+                groups.append((live_rows, False))
+
         by_key: dict[str, dict[str, Any]] = {}
-        for group in groups:
+        for group, apply_offset in groups:
+            use_offset = platform_offset if apply_offset else 0
             for item in group:
-                # advanced/history/compile: SEMPRE subtrai offset da plataforma
-                # (igual BinaryOptionsToolsV2). Live fallback: ja vem em UTC.
-                use_offset = 0 if live_adjusted else platform_offset
                 norm = normalize_candle(
                     item,
                     asset=asset,
@@ -541,105 +585,126 @@ class OhlcCollector1m:
                     by_key[key] = _prefer_better_candle(prev, norm)
         rows = list(by_key.values())
         rows.sort(key=lambda r: str(r.get("opened_at") or ""))
+        if not rows:
+            self._set(
+                message=(
+                    "Pocket nao retornou candles (timeout/vazio). "
+                    "Verifique SSID DEMO e ativo."
+                )
+            )
         return rows
 
     def _backfill_chunked(
         self, client: PocketOption, asset: str, tf: str
     ) -> int:
-        """Backfill em fatias para nao travar e ja popular o grafico cedo.
-
-        1) Ultimas 6h (rapido)  2) Depois fatias de 12h ate ~7 dias.
-        """
+        """Backfill com timeout: history/6h primeiro; fatias so se avancado responder."""
         period = TIMEFRAMES[tf]
         total = 0
-        # Fase rapida: 6 horas.
-        quick = 6 * 3600
-        self._set(message="Backfill 1m: buscando ultimas 6h…")
+        api_timeout = float(_env_int("OHLC_1M_API_TIMEOUT", 20))
+        platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
+
+        self._set(message="Backfill 1m: history + ultimas 6h (timeout)…")
         try:
             n = self._upsert_tf_with_offset(
-                client, asset, tf, offset=quick, backfill=True
+                client, asset, tf, offset=6 * 3600, backfill=True
             )
             total += n
-            self._set(message=f"Backfill 1m: +{n} velas (6h). Total {total}")
+            self._set(
+                message=(
+                    f"Backfill 1m: +{n} velas iniciais. Total {total}"
+                    if n > 0
+                    else "Backfill 1m: 0 na janela inicial — tentando fatias…"
+                )
+            )
         except Exception as exc:  # noqa: BLE001
-            self._set(message=f"Backfill 6h falhou: {exc}")
+            self._set(message=f"Backfill inicial falhou: {exc}")
 
-        # Historico: ate 7 dias em fatias de 12h (do passado para o presente).
-        full = BACKFILL_OFFSET[tf]
-        chunk = 12 * 3600
-        # ref_time anda para tras; cada fatia pede `chunk` segundos.
-        platform_offset = _env_int("POCKET_TIME_OFFSET", 7200)
+        # Fatias de 6h (menor que 12h) com timeout por chamada.
+        full = min(BACKFILL_OFFSET[tf], 3 * 86400)  # no max 3 dias no boot
+        chunk = 6 * 3600
         steps = max(1, (full + chunk - 1) // chunk)
         for i in range(steps):
             if self._stop.is_set():
                 break
-            # Quanto tempo atras termina esta fatia.
             end_ago = i * chunk
-            ref_unix = int(time.time()) - end_ago
-            ref_platform = ref_unix + platform_offset
+            ref_platform = int(time.time()) - end_ago + platform_offset
             self._set(
                 message=(
                     f"Backfill 1m: fatia {i + 1}/{steps} "
-                    f"(~{chunk // 3600}h, ref −{end_ago // 3600}h)…"
+                    f"(6h, −{end_ago // 3600}h)…"
                 )
             )
-            try:
-                raw = self._as_candle_list(
+
+            def _adv() -> list[dict[str, Any]]:
+                return self._as_candle_list(
                     client.get_candles_advanced(
                         asset, period, chunk, ref_platform
                     )
                 )
-                rows: list[dict[str, Any]] = []
-                for item in raw:
-                    norm = normalize_candle(
-                        item,
-                        asset=asset,
-                        timeframe=tf,
-                        time_offset=platform_offset,
-                    )
-                    if norm:
-                        rows.append(norm)
-                # Dedup por minuto preferindo corpo.
-                by_key: dict[str, dict[str, Any]] = {}
-                for row in rows:
-                    k = str(row["opened_at"])
-                    prev = by_key.get(k)
-                    by_key[k] = (
-                        row
-                        if prev is None
-                        else _prefer_better_candle(prev, row)
-                    )
-                rows = list(by_key.values())
-                rows = filter_closed_candles(rows, period)
-                rows = sanitize_ohlc_spikes(rows)
-                rows = self._reconcile_prefer_body(rows, asset, tf)
-                if rows:
-                    n = upsert_candles(rows, table=TABLE_1M)
-                    total += n
-                    with self._lock:
-                        prev_ok = int(
-                            self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0
-                        )
-                        self._snap["per_tf"][tf] = {
-                            "ok": prev_ok + n,
-                            "err": None,
-                        }
-                        self._snap["last_upsert"] = n
-                        self._snap["total_upserted"] = int(
-                            self._snap.get("total_upserted", 0) or 0
-                        ) + n
-                        self._refresh_stored()
-                    self._set(
-                        message=(
-                            f"Backfill 1m: fatia {i + 1}/{steps} → {n} velas "
-                            f"(total {total})"
-                        )
-                    )
-            except Exception as exc:  # noqa: BLE001
+
+            raw = _call_with_timeout(
+                _adv,
+                timeout=api_timeout,
+                default=[],
+                label=f"advanced_chunk_{i + 1}",
+            )
+            if not raw:
                 self._set(
-                    message=f"Backfill fatia {i + 1}/{steps} falhou: {exc}"
+                    message=(
+                        f"Backfill fatia {i + 1}/{steps}: timeout/vazio — "
+                        f"seguindo (total {total})"
+                    )
                 )
+                continue
+            by_key: dict[str, dict[str, Any]] = {}
+            for item in raw:
+                norm = normalize_candle(
+                    item,
+                    asset=asset,
+                    timeframe=tf,
+                    time_offset=platform_offset,
+                )
+                if not norm:
+                    continue
+                k = str(norm["opened_at"])
+                prev = by_key.get(k)
+                by_key[k] = (
+                    norm if prev is None else _prefer_better_candle(prev, norm)
+                )
+            rows = list(by_key.values())
+            rows = filter_closed_candles(rows, period)
+            rows = sanitize_ohlc_spikes(rows)
+            rows = self._reconcile_prefer_body(rows, asset, tf)
+            if not rows:
+                continue
+            n = upsert_candles(rows, table=TABLE_1M)
+            total += n
+            with self._lock:
+                prev_ok = int(
+                    self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0
+                )
+                self._snap["per_tf"][tf] = {"ok": prev_ok + n, "err": None}
+                self._snap["last_upsert"] = n
+                self._snap["total_upserted"] = int(
+                    self._snap.get("total_upserted", 0) or 0
+                ) + n
+                self._refresh_stored()
+            self._set(
+                message=(
+                    f"Backfill 1m: fatia {i + 1}/{steps} → {n} "
+                    f"(total {total})"
+                )
+            )
         self._purge_forming_candle(asset, tf)
+        if total <= 0:
+            self._set(
+                message=(
+                    "Backfill 1m: nenhuma vela. Pocket timeout ou SSID/ativo "
+                    "invalido. Pare e inicie de novo apos conferir."
+                ),
+                phase="error",
+                error="backfill_empty",
+            )
         return total
 
     def _upsert_tf_with_offset(
