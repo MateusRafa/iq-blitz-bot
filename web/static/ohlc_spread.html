@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spread OTC vs EURUSD — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+      .chart-wrap {
+        width: 100%;
+        height: 360px;
+        min-height: 280px;
+        margin-top: 0.5rem;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(34, 211, 238, 0.25);
+        background: #0a1220;
+      }
+      .chart-wrap--spread {
+        height: 200px;
+        min-height: 160px;
+      }
+      .chart-wrap--half {
+        height: 220px;
+        min-height: 180px;
+      }
+      .split-charts {
+        display: none;
+        flex-direction: column;
+        gap: 0.65rem;
+      }
+      .split-charts.visible {
+        display: flex;
+      }
+      .overlay-wrap.visible {
+        display: block;
+      }
+      .overlay-wrap {
+        display: none;
+      }
+      .chart-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .chart-modes .btn-mode {
+        font-size: 0.82rem;
+        padding: 0.35rem 0.7rem;
+        opacity: 0.72;
+      }
+      .chart-modes .btn-mode.active {
+        opacity: 1;
+        outline: 1px solid rgba(34, 211, 238, 0.55);
+        background: rgba(34, 211, 238, 0.12);
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.85rem;
+        font-size: 0.82rem;
+        color: #94a3b8;
+        margin: 0.35rem 0;
+      }
+      .legend span::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        margin-right: 0.35rem;
+        vertical-align: -1px;
+      }
+      .lg-otc::before { background: #22d3ee; }
+      .lg-eu::before { background: #fbbf24; }
+      .lg-spread::before { background: #a78bfa; }
+      .lg-wknd::before { background: #f43f5e; }
+      .chart-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin: 0.25rem 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack portal-header-stack--with-back">
+              <a class="portal-back-icon" href="/" title="Voltar ao portal" aria-label="Voltar ao portal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </a>
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Spread OTC × EURUSD</h1>
+                <p class="portal-header-subtitle">1h · descasamento (fim de semana em destaque)</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="portal-main portal-main--wide">
+        <div id="auth-box" class="panel">
+          <h2>Acesso</h2>
+          <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+            Informe o <code>CONTROL_TOKEN</code> configurado no Railway.
+          </p>
+          <div class="token-bar">
+            <input id="token-input" type="password" placeholder="CONTROL_TOKEN" autocomplete="off" />
+            <button type="button" class="btn" id="token-save">Salvar</button>
+          </div>
+          <div id="auth-erro" class="erro" hidden></div>
+        </div>
+
+        <div id="app-box" hidden>
+          <div class="panel">
+            <h2>
+              Coleta EURUSD
+              <span id="run-badge" class="badge badge-off">STAND-BY</span>
+            </h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Coleta o <strong>EURUSD</strong> (mercado) na tabela
+              <code>ohlc_candles_eurusd</code>. O OTC continua no coletor
+              <a href="/ohlc" style="color:#22d3ee">/ohlc</a>
+              (tabela <code>ohlc_candles</code>).
+              No fim de semana o spread usa o último close de sexta do EURUSD
+              vs cada vela OTC de sáb/dom.
+            </p>
+            <div class="controls">
+              <button type="button" class="btn btn-start" id="btn-start">Iniciar coleta</button>
+              <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-pull">Puxar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
+            </div>
+            <div id="cmd-erro" class="erro" hidden></div>
+            <div class="status-grid">
+              <div class="status-item"><span class="label">EURUSD fase</span><span class="value" id="s-phase">—</span></div>
+              <div class="status-item"><span class="label">EURUSD salvos</span><span class="value" id="s-eu">—</span></div>
+              <div class="status-item"><span class="label">OTC salvos</span><span class="value" id="s-otc">—</span></div>
+              <div class="status-item"><span class="label">OTC coletor</span><span class="value" id="s-otc-run">—</span></div>
+              <div class="status-item"><span class="label">Spread pts</span><span class="value" id="s-spread">—</span></div>
+              <div class="status-item"><span class="label">Fim de semana</span><span class="value" id="s-wknd">—</span></div>
+            </div>
+            <p class="message" id="s-msg"></p>
+          </div>
+
+          <div class="panel">
+            <h2>Preços 1h</h2>
+            <div class="chart-modes" role="group" aria-label="Layout">
+              <button type="button" class="btn btn-mode active" id="btn-overlay">Overlay</button>
+              <button type="button" class="btn btn-mode" id="btn-split">Separar</button>
+            </div>
+            <div class="legend">
+              <span class="lg-otc">EURUSD_otc</span>
+              <span class="lg-eu">EURUSD</span>
+            </div>
+            <p class="message" id="chart-meta">—</p>
+
+            <div id="overlay-wrap" class="overlay-wrap visible">
+              <div class="chart-wrap" id="price-chart"></div>
+            </div>
+            <div id="split-wrap" class="split-charts">
+              <p class="chart-label">EURUSD_otc</p>
+              <div class="chart-wrap chart-wrap--half" id="otc-chart"></div>
+              <p class="chart-label">EURUSD</p>
+              <div class="chart-wrap chart-wrap--half" id="eu-chart"></div>
+            </div>
+
+            <h2 style="margin-top:1.25rem">Spread (OTC − EURUSD)</h2>
+            <div class="legend">
+              <span class="lg-spread">Spread</span>
+              <span class="lg-wknd">carry / fim de semana</span>
+            </div>
+            <div class="chart-wrap chart-wrap--spread" id="spread-chart"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const TOKEN_KEY = "iq_blitz_control_token";
+      const LAYOUT_KEY = "iq_blitz_spread_layout";
+
+      function getToken() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
+      function setToken(v) {
+        localStorage.setItem(TOKEN_KEY, v);
+      }
+
+      async function api(path, method = "GET", body = null) {
+        const opts = {
+          method,
+          headers: { "X-Control-Token": getToken() },
+        };
+        if (body != null) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = data.detail || res.statusText || "Erro";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        return data;
+      }
+
+      const authBox = document.getElementById("auth-box");
+      const appBox = document.getElementById("app-box");
+      const authErro = document.getElementById("auth-erro");
+      const cmdErro = document.getElementById("cmd-erro");
+      const badge = document.getElementById("run-badge");
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const btnOverlay = document.getElementById("btn-overlay");
+      const btnSplit = document.getElementById("btn-split");
+      const overlayWrap = document.getElementById("overlay-wrap");
+      const splitWrap = document.getElementById("split-wrap");
+
+      let layout = localStorage.getItem(LAYOUT_KEY) || "overlay";
+      let priceChart = null;
+      let otcChart = null;
+      let euChart = null;
+      let spreadChart = null;
+      let seriesOtc = null;
+      let seriesEu = null;
+      let seriesOtcSplit = null;
+      let seriesEuSplit = null;
+      let seriesSpread = null;
+      let seriesWeekend = null;
+      let lastMeta = "";
+
+      function showAuth(err) {
+        authBox.hidden = false;
+        appBox.hidden = true;
+        if (err) {
+          authErro.hidden = false;
+          authErro.textContent = err;
+        } else authErro.hidden = true;
+      }
+      function showApp() {
+        authBox.hidden = true;
+        appBox.hidden = false;
+        authErro.hidden = true;
+      }
+      function setCmdErro(msg) {
+        if (!msg) {
+          cmdErro.hidden = true;
+          cmdErro.textContent = "";
+          return;
+        }
+        cmdErro.hidden = false;
+        cmdErro.textContent = msg;
+      }
+
+      function toCandle(rows) {
+        const out = [];
+        for (const r of rows || []) {
+          const ms = Date.parse(r.opened_at);
+          if (Number.isNaN(ms)) continue;
+          out.push({
+            time: Math.floor(ms / 1000),
+            open: +r.open,
+            high: +r.high,
+            low: +r.low,
+            close: +r.close,
+          });
+        }
+        out.sort((a, b) => a.time - b.time);
+        return out;
+      }
+
+      function chartOpts(el) {
+        const w = Math.max(el.clientWidth || 600, 100);
+        const h = Math.max(el.clientHeight || 280, 160);
+        return {
+          autoSize: false,
+          width: w,
+          height: h,
+          layout: { background: { color: "#0a1220" }, textColor: "#94a3b8" },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: { borderColor: "rgba(34,211,238,0.25)" },
+          timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
+        };
+      }
+
+      function candleSeries(chart, up, down) {
+        return chart.addCandlestickSeries({
+          upColor: up,
+          downColor: down,
+          borderUpColor: up,
+          borderDownColor: down,
+          wickUpColor: up,
+          wickDownColor: down,
+          priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+        });
+      }
+
+      function ensureCharts() {
+        if (typeof LightweightCharts === "undefined") return false;
+        if (!priceChart) {
+          const el = document.getElementById("price-chart");
+          priceChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesOtc = candleSeries(priceChart, "#22d3ee", "#0891b2");
+          seriesEu = candleSeries(priceChart, "#fbbf24", "#d97706");
+        }
+        if (!otcChart) {
+          const el = document.getElementById("otc-chart");
+          otcChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesOtcSplit = candleSeries(otcChart, "#22d3ee", "#0891b2");
+        }
+        if (!euChart) {
+          const el = document.getElementById("eu-chart");
+          euChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesEuSplit = candleSeries(euChart, "#fbbf24", "#d97706");
+        }
+        if (!spreadChart) {
+          const el = document.getElementById("spread-chart");
+          spreadChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesSpread = spreadChart.addLineSeries({
+            color: "#a78bfa",
+            lineWidth: 2,
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+          seriesWeekend = spreadChart.addLineSeries({
+            color: "#f43f5e",
+            lineWidth: 2,
+            lineStyle: 2,
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            lastValueVisible: false,
+            priceLineVisible: false,
+          });
+          seriesSpread.createPriceLine({
+            price: 0,
+            color: "rgba(148,163,184,0.7)",
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: "0",
+          });
+        }
+        return true;
+      }
+
+      function resizeAll() {
+        for (const [chart, id] of [
+          [priceChart, "price-chart"],
+          [otcChart, "otc-chart"],
+          [euChart, "eu-chart"],
+          [spreadChart, "spread-chart"],
+        ]) {
+          if (!chart) continue;
+          const el = document.getElementById(id);
+          if (!el || el.offsetParent === null && id !== "spread-chart") continue;
+          const w = Math.max(el.clientWidth || 100, 100);
+          const h = Math.max(el.clientHeight || 160, 140);
+          chart.applyOptions({ width: w, height: h });
+        }
+      }
+
+      function syncLayoutButtons() {
+        btnOverlay.classList.toggle("active", layout === "overlay");
+        btnSplit.classList.toggle("active", layout === "split");
+        overlayWrap.classList.toggle("visible", layout === "overlay");
+        splitWrap.classList.toggle("visible", layout === "split");
+        requestAnimationFrame(() => {
+          resizeAll();
+          if (priceChart) priceChart.timeScale().fitContent();
+          if (otcChart) otcChart.timeScale().fitContent();
+          if (euChart) euChart.timeScale().fitContent();
+        });
+      }
+
+      function setLayout(mode) {
+        layout = mode === "split" ? "split" : "overlay";
+        localStorage.setItem(LAYOUT_KEY, layout);
+        syncLayoutButtons();
+      }
+
+      function applySeries(data) {
+        if (!ensureCharts()) {
+          document.getElementById("chart-meta").textContent =
+            "Biblioteca de gráfico indisponível.";
+          return;
+        }
+        const otc = toCandle(data.otc);
+        const eu = toCandle(data.eurusd);
+        seriesOtc.setData(otc);
+        seriesEu.setData(eu);
+        seriesOtcSplit.setData(otc);
+        seriesEuSplit.setData(eu);
+
+        const paired = [];
+        const weekend = [];
+        for (const p of data.spread || []) {
+          const pt = { time: p.time, value: p.spread };
+          if (p.weekend || p.mode === "carry") weekend.push(pt);
+          else paired.push(pt);
+        }
+        // Linha continua: junta tudo na seriesSpread; weekend tambem marcado
+        const allSpread = (data.spread || []).map((p) => ({
+          time: p.time,
+          value: p.spread,
+        }));
+        seriesSpread.setData(allSpread);
+        seriesWeekend.setData(weekend);
+
+        lastMeta =
+          (data.otc_asset || "OTC") +
+          " · " +
+          otc.length +
+          " velas · " +
+          (data.eurusd_asset || "EURUSD") +
+          " · " +
+          eu.length +
+          " velas · spread " +
+          allSpread.length +
+          " (" +
+          (data.weekend_points || 0) +
+          " carry/fds)";
+        document.getElementById("chart-meta").textContent = lastMeta;
+        document.getElementById("s-spread").textContent = String(allSpread.length);
+        document.getElementById("s-wknd").textContent = String(
+          data.weekend_points || 0
+        );
+
+        resizeAll();
+        priceChart.timeScale().fitContent();
+        otcChart.timeScale().fitContent();
+        euChart.timeScale().fitContent();
+        spreadChart.timeScale().fitContent();
+      }
+
+      function renderStatus(st) {
+        const eu = st.eurusd || {};
+        const otc = st.otc || {};
+        const running = !!eu.running;
+        badge.textContent = running ? "COLETANDO" : "STAND-BY";
+        badge.className = "badge " + (running ? "badge-on" : "badge-off");
+        btnStart.disabled = running;
+        btnStop.disabled = !running;
+        document.getElementById("s-phase").textContent = eu.phase || "—";
+        document.getElementById("s-eu").textContent =
+          eu.stored_count != null ? String(eu.stored_count) : "—";
+        document.getElementById("s-otc").textContent =
+          otc.stored_count != null ? String(otc.stored_count) : "—";
+        document.getElementById("s-otc-run").textContent = otc.collector_running
+          ? "ligado"
+          : "parado";
+        document.getElementById("s-msg").textContent =
+          eu.message || eu.error || "";
+      }
+
+      async function loadCharts() {
+        const data = await api("/api/ohlc-spread/series?limit=0");
+        applySeries(data);
+      }
+
+      async function refresh() {
+        const st = await api("/api/ohlc-spread/status");
+        renderStatus(st);
+        await loadCharts();
+        return st;
+      }
+
+      btnOverlay.addEventListener("click", () => setLayout("overlay"));
+      btnSplit.addEventListener("click", () => setLayout("split"));
+
+      document.getElementById("token-save").addEventListener("click", async () => {
+        setToken(document.getElementById("token-input").value.trim());
+        try {
+          showApp();
+          syncLayoutButtons();
+          await refresh();
+          setCmdErro("");
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      });
+
+      btnStart.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc-spread/start", "POST", {
+            asset: "EURUSD",
+          });
+          renderStatus(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStop.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc-spread/stop", "POST");
+          renderStatus(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-pull").addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc-spread/pull-now", "POST");
+          renderStatus(st);
+          await loadCharts();
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-reload").addEventListener("click", async () => {
+        try {
+          await loadCharts();
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      window.addEventListener("resize", resizeAll);
+      if (typeof ResizeObserver !== "undefined") {
+        new ResizeObserver(() => resizeAll()).observe(
+          document.getElementById("price-chart").parentElement || document.body
+        );
+      }
+
+      (async () => {
+        const t = getToken();
+        if (t) document.getElementById("token-input").value = t;
+        if (!t) {
+          showAuth();
+          return;
+        }
+        try {
+          showApp();
+          syncLayoutButtons();
+          await refresh();
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      })();
+
+      setInterval(() => {
+        if (appBox.hidden) return;
+        refresh().catch(() => {});
+      }, 15000);
+    </script>
+  </body>
+</html>
