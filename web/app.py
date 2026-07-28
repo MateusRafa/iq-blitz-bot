@@ -4,22 +4,20 @@ from __future__ import annotations
 
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bot.ohlc_collector import collector
-from bot.ohlc_collector_1m import collector_1m
+from bot.ohlc_collector_1d import collector_1d
 from bot.ohlc_store import (
-    TABLE_1M,
+    TABLE_1D,
     candles_to_csv,
     fetch_candles,
     fetch_candles_range,
-    run_retention_cleanup_1m,
 )
 from bot.runner import MIN_DURATION, normalize_asset, runner
 
@@ -44,8 +42,8 @@ class OhlcStartBody(BaseModel):
     asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
-class OhlcResyncBody(BaseModel):
-    minutes: int = Field(default=20, ge=1, le=180)
+class OhlcResyncDaysBody(BaseModel):
+    days: int = Field(default=30, ge=1, le=365)
 
 
 def _control_token() -> str:
@@ -82,24 +80,29 @@ def ohlc_page() -> FileResponse:
     return FileResponse(STATIC / "ohlc.html")
 
 
+@app.get("/ohlc-1d")
+def ohlc_1d_page() -> FileResponse:
+    return FileResponse(STATIC / "ohlc_1d.html")
+
+
 @app.get("/ohlc-1m")
-def ohlc_1m_page() -> FileResponse:
-    return FileResponse(STATIC / "ohlc_1m.html")
+def ohlc_1m_redirect() -> RedirectResponse:
+    """Ferramenta 1m substituida pelo coletor diario."""
+    return RedirectResponse(url="/ohlc-1d", status_code=302)
 
 
 @app.get("/api/health")
 def health() -> dict:
     st = collector.status()
-    st1 = collector_1m.status()
+    st1 = collector_1d.status()
     return {
         "ok": True,
         "bot_running": runner.is_running(),
         "ohlc_running": collector.is_running(),
-        "ohlc_1m_running": collector_1m.is_running(),
+        "ohlc_1d_running": collector_1d.is_running(),
         "supabase_ok": bool(st.get("supabase_ok")),
         "token_configured": bool(_control_token()),
         "duration_seconds": runner.get_duration_seconds(),
-        "ohlc_1m_warn": bool((st1.get("retention") or {}).get("warn")),
     }
 
 
@@ -193,55 +196,55 @@ def ohlc_candles(
     }
 
 
-# --- OHLC 1m ---
+# --- OHLC diario (D1) ---
 
 
-@app.get("/api/ohlc1m/status")
-def ohlc1m_status(_: None = Depends(require_token)) -> dict:
-    return collector_1m.status()
+@app.get("/api/ohlc1d/status")
+def ohlc1d_status(_: None = Depends(require_token)) -> dict:
+    return collector_1d.status()
 
 
-@app.post("/api/ohlc1m/asset")
-def ohlc1m_asset(
+@app.post("/api/ohlc1d/asset")
+def ohlc1d_asset(
     body: OhlcAssetBody, _: None = Depends(require_token)
 ) -> dict:
     try:
-        return collector_1m.set_asset(body.asset)
+        return collector_1d.set_asset(body.asset)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/ohlc1m/start")
-def ohlc1m_start(
+@app.post("/api/ohlc1d/start")
+def ohlc1d_start(
     body: OhlcStartBody = OhlcStartBody(),
     _: None = Depends(require_token),
 ) -> dict:
     try:
-        return collector_1m.start(body.asset)
+        return collector_1d.start(body.asset)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/ohlc1m/stop")
-def ohlc1m_stop(_: None = Depends(require_token)) -> dict:
-    return collector_1m.stop()
+@app.post("/api/ohlc1d/stop")
+def ohlc1d_stop(_: None = Depends(require_token)) -> dict:
+    return collector_1d.stop()
 
 
-@app.get("/api/ohlc1m/candles")
-def ohlc1m_candles(
+@app.get("/api/ohlc1d/candles")
+def ohlc1d_candles(
     asset: str | None = None,
-    timeframe: str = "1m",
-    limit: int = 500,
+    timeframe: str = "1d",
+    limit: int = 2000,
     _: None = Depends(require_token),
 ) -> dict:
-    if timeframe != "1m":
-        raise HTTPException(status_code=400, detail="Timeframe suportado: 1m")
+    if timeframe != "1d":
+        raise HTTPException(status_code=400, detail="Timeframe suportado: 1d")
     a = normalize_asset(
-        asset or collector_1m.status().get("asset") or "EURUSD_otc"
+        asset or collector_1d.status().get("asset") or "EURUSD_otc"
     )
     try:
         rows = fetch_candles(
-            a, timeframe=timeframe, limit=limit, table=TABLE_1M
+            a, timeframe=timeframe, limit=limit, table=TABLE_1D
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -253,38 +256,20 @@ def ohlc1m_candles(
     }
 
 
-@app.get("/api/ohlc1m/export")
-def ohlc1m_export(
+@app.get("/api/ohlc1d/export")
+def ohlc1d_export(
     asset: str | None = None,
-    scope: str = Query(default="all"),
     _: None = Depends(require_token),
 ) -> Response:
-    """Download CSV (tudo ou so o que entra na janela de aviso/limpeza)."""
-    if scope not in ("all", "at_risk"):
-        raise HTTPException(status_code=400, detail="scope: all | at_risk")
-    st = collector_1m.status()
+    """Download CSV com todo o historico D1 salvo."""
+    st = collector_1d.status()
     a = normalize_asset(asset or st.get("asset") or "EURUSD_otc")
-    before = None
-    if scope == "at_risk":
-        ret = st.get("retention") or {}
-        raw = ret.get("delete_before")
-        try:
-            delete_before = datetime.fromisoformat(
-                str(raw).replace("Z", "+00:00")
-            )
-            if delete_before.tzinfo is None:
-                delete_before = delete_before.replace(tzinfo=timezone.utc)
-            before = delete_before + timedelta(days=1)
-        except Exception:  # noqa: BLE001
-            before = None
     try:
-        rows = fetch_candles_range(
-            a, timeframe="1m", table=TABLE_1M, before=before
-        )
+        rows = fetch_candles_range(a, timeframe="1d", table=TABLE_1D)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     csv_text = candles_to_csv(rows)
-    fname = f"ohlc_1m_{a}_{scope}.csv"
+    fname = f"ohlc_1d_{a}.csv"
     return Response(
         content=csv_text,
         media_type="text/csv; charset=utf-8",
@@ -294,36 +279,52 @@ def ohlc1m_export(
     )
 
 
-@app.post("/api/ohlc1m/cleanup")
-def ohlc1m_cleanup(_: None = Depends(require_token)) -> dict:
-    """Forca limpeza de velas >90 dias (tambem roda no loop do coletor)."""
-    a = normalize_asset(collector_1m.status().get("asset") or "EURUSD_otc")
+@app.post("/api/ohlc1d/pull-now")
+def ohlc1d_pull_now(_: None = Depends(require_token)) -> dict:
+    """Puxada manual: D1 nativo Pocket + upsert."""
     try:
-        return run_retention_cleanup_1m(a)
+        return collector_1d.pull_now()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/ohlc1d/resync-recent")
+def ohlc1d_resync_recent(
+    body: OhlcResyncDaysBody = OhlcResyncDaysBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Apaga os ultimos N dias no Supabase e repuxa da Pocket."""
+    try:
+        return collector_1d.resync_recent(body.days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# --- Compat: rotas antigas /api/ohlc1m/* → D1 ---
+
+
+@app.get("/api/ohlc1m/status")
+def ohlc1m_status_compat(_: None = Depends(require_token)) -> dict:
+    return collector_1d.status()
 
 
 @app.post("/api/ohlc1m/pull-now")
-def ohlc1m_pull_now(_: None = Depends(require_token)) -> dict:
-    """Puxada manual igual a 1a sync: so velas fechadas, upsert sem duplicar."""
-    try:
-        return collector_1m.pull_now()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+def ohlc1m_pull_now_compat(_: None = Depends(require_token)) -> dict:
+    return ohlc1d_pull_now(_)
 
 
-@app.post("/api/ohlc1m/resync-recent")
-def ohlc1m_resync_recent(
-    body: OhlcResyncBody = OhlcResyncBody(),
+@app.post("/api/ohlc1m/start")
+def ohlc1m_start_compat(
+    body: OhlcStartBody = OhlcStartBody(),
     _: None = Depends(require_token),
 ) -> dict:
-    """Apaga os ultimos N minutos no Supabase e repuxa da Pocket (upsert)."""
-    try:
-        return collector_1m.resync_recent(body.minutes)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return ohlc1d_start(body, _)
+
+
+@app.post("/api/ohlc1m/stop")
+def ohlc1m_stop_compat(_: None = Depends(require_token)) -> dict:
+    return ohlc1d_stop(_)
