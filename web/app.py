@@ -13,10 +13,13 @@ from pydantic import BaseModel, Field
 
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
+from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
+from bot.ohlc_spread import build_spread_1h
 from bot.ohlc_store import (
     candles_to_csv,
     fetch_candles,
     fetch_candles_range,
+    stored_summary,
 )
 from bot.runner import MIN_DURATION, normalize_asset, runner
 
@@ -84,6 +87,11 @@ def ohlc_1d_page() -> FileResponse:
     return FileResponse(STATIC / "ohlc_1d.html")
 
 
+@app.get("/ohlc-spread")
+def ohlc_spread_page() -> FileResponse:
+    return FileResponse(STATIC / "ohlc_spread.html")
+
+
 @app.get("/ohlc-1m")
 def ohlc_1m_redirect() -> RedirectResponse:
     """Ferramenta 1m substituida pelo coletor diario."""
@@ -99,6 +107,7 @@ def health() -> dict:
         "bot_running": runner.is_running(),
         "ohlc_running": collector.is_running(),
         "ohlc_1d_running": collector_1d.is_running(),
+        "ohlc_eurusd_running": collector_eurusd.is_running(),
         "supabase_ok": bool(st.get("supabase_ok")),
         "token_configured": bool(_control_token()),
         "duration_seconds": runner.get_duration_seconds(),
@@ -333,3 +342,103 @@ def ohlc1m_start_compat(
 @app.post("/api/ohlc1m/stop")
 def ohlc1m_stop_compat(_: None = Depends(require_token)) -> dict:
     return ohlc1d_stop(_)
+
+
+# --- Spread OTC vs EURUSD (1h) ---
+
+
+@app.get("/api/ohlc-spread/status")
+def ohlc_spread_status(_: None = Depends(require_token)) -> dict:
+    otc_asset = normalize_asset(
+        os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+        or collector.status().get("asset")
+        or "EURUSD_otc"
+    )
+    eu_st = collector_eurusd.status()
+    otc_sum = stored_summary(otc_asset, "1h")
+    return {
+        "otc": {
+            "asset": otc_asset,
+            "collector_running": collector.is_running(),
+            "table": "ohlc_candles",
+            **otc_sum,
+        },
+        "eurusd": eu_st,
+        "timeframe": "1h",
+        "supabase_ok": eu_st.get("supabase_ok"),
+        "supabase_msg": eu_st.get("supabase_msg"),
+    }
+
+
+@app.post("/api/ohlc-spread/start")
+def ohlc_spread_start(
+    body: OhlcStartBody = OhlcStartBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Inicia coletor EURUSD (mercado). OTC continua no /ohlc."""
+    try:
+        eu = collector_eurusd.start(body.asset or "EURUSD")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ohlc_spread_status(_)
+
+
+@app.post("/api/ohlc-spread/stop")
+def ohlc_spread_stop(_: None = Depends(require_token)) -> dict:
+    collector_eurusd.stop()
+    return ohlc_spread_status(_)
+
+
+@app.post("/api/ohlc-spread/pull-now")
+def ohlc_spread_pull_now(_: None = Depends(require_token)) -> dict:
+    try:
+        pull = collector_eurusd.pull_now()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_status(_)
+    st["pull"] = pull.get("pull")
+    return st
+
+
+@app.get("/api/ohlc-spread/series")
+def ohlc_spread_series(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    limit: int = 0,
+    _: None = Depends(require_token),
+) -> dict:
+    """Candles OTC + EURUSD + serie de spread (carry no fim de semana)."""
+    otc_a = normalize_asset(
+        otc_asset
+        or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+        or collector.status().get("asset")
+        or "EURUSD_otc"
+    )
+    eu_a = normalize_asset(
+        eurusd_asset
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
+    )
+    try:
+        otc_rows = fetch_candles(otc_a, timeframe="1h", limit=limit)
+        eu_rows = fetch_candles(
+            eu_a, timeframe="1h", limit=limit, table=TABLE_EURUSD
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    spread = build_spread_1h(otc_rows, eu_rows)
+    weekend_n = sum(1 for p in spread if p.get("weekend"))
+    return {
+        "timeframe": "1h",
+        "otc_asset": otc_a,
+        "eurusd_asset": eu_a,
+        "otc_count": len(otc_rows),
+        "eurusd_count": len(eu_rows),
+        "spread_count": len(spread),
+        "weekend_points": weekend_n,
+        "otc": otc_rows,
+        "eurusd": eu_rows,
+        "spread": spread,
+    }
