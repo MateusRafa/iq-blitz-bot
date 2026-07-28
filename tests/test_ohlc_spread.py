@@ -39,15 +39,18 @@ def test_spread_paired_and_weekend_carry():
     assert pts[2]["mode"] == "paired"
 
 
-def test_detect_eurusd_opens_after_daily_gap():
+def test_detect_eurusd_opens_one_per_day():
+    # UTC-3: 2024-06-10 03:00 UTC = ainda dia 10 local; 02:00 UTC = dia 09 local
     rows = [
+        {"opened_at": "2024-06-10T03:00:00+00:00"},  # dia 10 00:00 Pocket
+        {"opened_at": "2024-06-10T04:00:00+00:00"},
         {"opened_at": "2024-06-10T10:00:00+00:00"},
-        {"opened_at": "2024-06-10T11:00:00+00:00"},
-        # gap de 14h (fechamento diario)
-        {"opened_at": "2024-06-11T01:00:00+00:00"},
-        {"opened_at": "2024-06-11T02:00:00+00:00"},
+        {"opened_at": "2024-06-11T03:00:00+00:00"},  # dia 11
+        {"opened_at": "2024-06-11T05:00:00+00:00"},
     ]
-    opens = detect_eurusd_opens(rows, gap_hours=2)
+    opens = detect_eurusd_opens(rows, pocket_offset=-10800)
     assert len(opens) == 2
-    assert opens[0]["opened_at"].startswith("2024-06-10T10:00:00")
-    assert opens[1]["opened_at"].startswith("2024-06-11T01:00:00")
+    assert opens[0]["day"] == "2024-06-10"
+    assert opens[0]["opened_at"].startswith("2024-06-10T03:00:00")
+    assert opens[1]["day"] == "2024-06-11"
+    assert opens[1]["opened_at"].startswith("2024-06-11T03:00:00")
