@@ -162,6 +162,7 @@
             <div class="chart-modes" role="group" aria-label="Layout">
               <button type="button" class="btn btn-mode active" id="btn-overlay">Overlay</button>
               <button type="button" class="btn btn-mode" id="btn-split">Separar</button>
+              <button type="button" class="btn btn-mode" id="btn-link">Link off</button>
             </div>
             <div class="legend">
               <span class="lg-otc">EURUSD_otc</span>
@@ -183,7 +184,7 @@
             <div class="legend">
               <span class="lg-spread">Spread</span>
               <span class="lg-wknd">fora do horário EURUSD</span>
-              <span class="lg-open">abertura EURUSD</span>
+              <span class="lg-open">abertura diária EURUSD</span>
             </div>
             <div class="chart-wrap chart-wrap--spread" id="spread-chart-wrap">
               <div id="spread-chart" style="width:100%;height:100%"></div>
@@ -197,6 +198,7 @@
     <script>
       const TOKEN_KEY = "iq_blitz_control_token";
       const LAYOUT_KEY = "iq_blitz_spread_layout";
+      const LINK_KEY = "iq_blitz_spread_link";
 
       function getToken() {
         return localStorage.getItem(TOKEN_KEY) || "";
@@ -232,10 +234,12 @@
       const btnStop = document.getElementById("btn-stop");
       const btnOverlay = document.getElementById("btn-overlay");
       const btnSplit = document.getElementById("btn-split");
+      const btnLink = document.getElementById("btn-link");
       const overlayWrap = document.getElementById("overlay-wrap");
       const splitWrap = document.getElementById("split-wrap");
 
       let layout = localStorage.getItem(LAYOUT_KEY) || "overlay";
+      let linkOn = localStorage.getItem(LINK_KEY) === "1";
       let priceChart = null;
       let otcChart = null;
       let euChart = null;
@@ -249,6 +253,11 @@
       let lastMeta = "";
       let eurusdOpens = [];
       let openLinesBound = false;
+      let chartLinkBound = false;
+      let syncingCharts = false;
+      let lastOtcCandles = [];
+      let lastEuCandles = [];
+      let lastSpreadPoints = [];
 
       function showAuth(err) {
         authBox.hidden = false;
@@ -364,8 +373,123 @@
             title: "0",
           });
           bindOpenLines();
+          bindChartLink();
         }
         return true;
+      }
+
+      function visibleCharts() {
+        const list = [];
+        if (layout === "overlay" && priceChart) {
+          list.push({ chart: priceChart, series: seriesOtc, kind: "candle", points: lastOtcCandles });
+        }
+        if (layout === "split") {
+          if (otcChart) {
+            list.push({
+              chart: otcChart,
+              series: seriesOtcSplit,
+              kind: "candle",
+              points: lastOtcCandles,
+            });
+          }
+          if (euChart) {
+            list.push({
+              chart: euChart,
+              series: seriesEuSplit,
+              kind: "candle",
+              points: lastEuCandles,
+            });
+          }
+        }
+        if (spreadChart) {
+          list.push({
+            chart: spreadChart,
+            series: seriesSpread,
+            kind: "line",
+            points: lastSpreadPoints,
+          });
+        }
+        return list;
+      }
+
+      function valueAtTime(points, time, kind) {
+        if (!points || !points.length || time == null) return null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time === time) {
+            return kind === "candle" ? points[i].close : points[i].value;
+          }
+        }
+        let best = null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time <= time) {
+            best = kind === "candle" ? points[i].close : points[i].value;
+          } else break;
+        }
+        return best;
+      }
+
+      function bindChartLink() {
+        if (chartLinkBound) return;
+        const charts = [priceChart, otcChart, euChart, spreadChart].filter(Boolean);
+        if (charts.length < 2) return;
+        chartLinkBound = true;
+
+        const onCrosshair = (srcChart, param) => {
+          if (!linkOn || syncingCharts) return;
+          syncingCharts = true;
+          try {
+            for (const item of visibleCharts()) {
+              if (item.chart === srcChart || !item.series) continue;
+              if (!param || param.time == null) {
+                if (typeof item.chart.clearCrosshairPosition === "function") {
+                  item.chart.clearCrosshairPosition();
+                }
+                continue;
+              }
+              const y = valueAtTime(item.points, param.time, item.kind);
+              if (y == null) continue;
+              if (typeof item.chart.setCrosshairPosition === "function") {
+                item.chart.setCrosshairPosition(y, param.time, item.series);
+              }
+            }
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        const onRange = (srcChart, range) => {
+          if (!linkOn || syncingCharts || !range) return;
+          syncingCharts = true;
+          try {
+            for (const item of visibleCharts()) {
+              if (item.chart === srcChart) continue;
+              try {
+                item.chart.timeScale().setVisibleLogicalRange(range);
+              } catch (_) {}
+            }
+            drawEurusdOpenLines();
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        for (const c of charts) {
+          c.subscribeCrosshairMove((param) => onCrosshair(c, param));
+          c.timeScale().subscribeVisibleLogicalRangeChange((range) =>
+            onRange(c, range)
+          );
+        }
+      }
+
+      function syncLinkButton() {
+        btnLink.classList.toggle("active", linkOn);
+        btnLink.textContent = linkOn ? "Link ON" : "Link off";
+      }
+
+      function setLinkOn(on) {
+        linkOn = !!on;
+        localStorage.setItem(LINK_KEY, linkOn ? "1" : "0");
+        syncLinkButton();
       }
 
       function bindOpenLines() {
@@ -435,6 +559,7 @@
         btnSplit.classList.toggle("active", layout === "split");
         overlayWrap.classList.toggle("visible", layout === "overlay");
         splitWrap.classList.toggle("visible", layout === "split");
+        syncLinkButton();
         requestAnimationFrame(() => {
           resizeAll();
           if (priceChart) priceChart.timeScale().fitContent();
@@ -461,6 +586,8 @@
         seriesEu.setData(eu);
         seriesOtcSplit.setData(otc);
         seriesEuSplit.setData(eu);
+        lastOtcCandles = otc;
+        lastEuCandles = eu;
 
         const weekend = [];
         for (const p of data.spread || []) {
@@ -473,6 +600,7 @@
         }));
         seriesSpread.setData(allSpread);
         seriesWeekend.setData(weekend);
+        lastSpreadPoints = allSpread;
 
         eurusdOpens = (data.eurusd_opens || []).map((o) => ({
           time: o.time,
@@ -557,6 +685,7 @@
 
       btnOverlay.addEventListener("click", () => setLayout("overlay"));
       btnSplit.addEventListener("click", () => setLayout("split"));
+      btnLink.addEventListener("click", () => setLinkOn(!linkOn));
 
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
