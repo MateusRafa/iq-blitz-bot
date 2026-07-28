@@ -338,7 +338,13 @@ def fetch_candles(
     limit: int = 200,
     table: str = TABLE,
 ) -> list[dict[str, Any]]:
-    """Candles mais recentes (ordem cronologica crescente para o grafico)."""
+    """Candles para o grafico (ordem cronologica crescente).
+
+    limit <= 0: traz todo o historico do asset+tf (paginado).
+    limit > 0: as N velas mais recentes (teto 5000).
+    """
+    if int(limit) <= 0:
+        return fetch_candles_range(asset, timeframe=timeframe, table=table)
     ok, msg = supabase_ok()
     if not ok:
         raise RuntimeError(msg)
