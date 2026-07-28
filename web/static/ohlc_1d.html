@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Coletor OHLC 1m — IQ Blitz</title>
+    <title>Coletor OHLC Diário — IQ Blitz</title>
     <link rel="stylesheet" href="/static/portal.css" />
     <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
@@ -43,40 +43,6 @@
         font-size: 0.95rem;
         padding: 1rem;
         text-align: center;
-      }
-      .countdown-box {
-        margin-top: 0.85rem;
-        padding: 0.85rem 1rem;
-        border-radius: 10px;
-        border: 1px solid rgba(34, 211, 238, 0.35);
-        background: linear-gradient(135deg, #0b1a2e 0%, #0a1220 100%);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-        flex-wrap: wrap;
-      }
-      .countdown-box .cd-label {
-        color: #94a3b8;
-        font-size: 0.85rem;
-      }
-      .countdown-box .cd-time {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 2rem;
-        font-weight: 700;
-        color: #22d3ee;
-        letter-spacing: 0.06em;
-        min-width: 5.5rem;
-        text-align: right;
-      }
-      .countdown-box.cd-pulling .cd-time {
-        color: #fbbf24;
-        font-size: 1.25rem;
-        letter-spacing: 0;
-      }
-      .countdown-box.cd-idle .cd-time {
-        color: #64748b;
-        font-size: 1.25rem;
       }
       .chart-modes {
         display: flex;
@@ -163,10 +129,9 @@
         margin-right: 0.35rem;
         vertical-align: -1px;
       }
-      .prob-wrap .lg-5m::before { background: #22d3ee; }
-      .prob-wrap .lg-15m::before { background: #a78bfa; }
-      .prob-wrap .lg-30m::before { background: #fbbf24; }
-      .prob-wrap .lg-1h::before { background: #34d399; }
+      .prob-wrap .lg-1h::before { background: #22d3ee; }
+      .prob-wrap .lg-4h::before { background: #a78bfa; }
+      .prob-wrap .lg-8h::before { background: #fbbf24; }
       .chart-wrap--prob {
         height: 200px;
         min-height: 160px;
@@ -191,52 +156,6 @@
       }
       .ind-stats .pos { color: #22d3ee; }
       .ind-stats .neg { color: #f43f5e; }
-      .cleanup-modal {
-        position: fixed;
-        inset: 0;
-        z-index: 80;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 1rem;
-        background: rgba(2, 8, 20, 0.72);
-      }
-      .cleanup-modal[hidden] { display: none !important; }
-      .cleanup-card {
-        width: min(440px, 100%);
-        background: #0f1a2e;
-        border: 1px solid rgba(34, 211, 238, 0.35);
-        border-radius: 12px;
-        padding: 1.1rem 1.2rem;
-        color: #e2e8f0;
-      }
-      .cleanup-card h3 {
-        margin: 0 0 0.5rem;
-        color: #22d3ee;
-        font-size: 1.05rem;
-      }
-      .cleanup-card p {
-        margin: 0 0 0.75rem;
-        color: #94a3b8;
-        font-size: 0.9rem;
-        line-height: 1.45;
-      }
-      .cleanup-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-      }
-      .retention-banner {
-        display: none;
-        margin: 0.5rem 0 0;
-        padding: 0.55rem 0.75rem;
-        border-radius: 8px;
-        border: 1px solid rgba(251, 191, 36, 0.45);
-        background: rgba(251, 191, 36, 0.1);
-        color: #fde68a;
-        font-size: 0.85rem;
-      }
-      .retention-banner.visible { display: block; }
     </style>
   </head>
   <body>
@@ -249,8 +168,8 @@
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
               </a>
               <div class="portal-header-text">
-                <h1 class="portal-header-title">Coletor OHLC 1m</h1>
-                <p class="portal-header-subtitle">Pocket 1m → Supabase + mesmo kit de gráficos</p>
+                <h1 class="portal-header-title">Coletor OHLC Diário</h1>
+                <p class="portal-header-subtitle">D1 nativo Pocket → Supabase</p>
               </div>
             </div>
           </div>
@@ -277,7 +196,9 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Candles <strong>1m</strong>. Ao <strong>Iniciar</strong>: 1ª puxada + cronômetro de <strong>5 min</strong>; ao zerar, puxa de novo com a mesma lógica de <strong>Puxar agora</strong> (só fechadas, sem duplicar).
+              Ativo <strong>fixo</strong>. Puxa candles <strong>D1 nativos</strong> da Pocket
+              (mesmo timeframe da plataforma). Sync automático todo dia às
+              <strong>00:05</strong> (horário Pocket, ex. UTC−3). Histórico sem limite.
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -287,26 +208,12 @@
             <div class="controls" style="margin-top:0.85rem">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-pull-now">Puxar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-resync">Re-sync 30d</button>
+              <button type="button" class="btn btn-apply" id="btn-export">Download CSV</button>
               <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
-              <button type="button" class="btn btn-apply" id="btn-pull-now" title="Puxa histórico como na 1ª sync (só fechadas, sem duplicar)">
-                Puxar agora
-              </button>
-              <button type="button" class="btn" id="btn-resync-20" title="Apaga os últimos 20 min no DB e repuxa da Pocket (sem duplicar)">
-                Re-sync 20 min
-              </button>
-              <button type="button" class="btn" id="btn-export-csv">Export CSV</button>
-            </div>
-            <div id="countdown-box" class="countdown-box cd-idle" aria-live="polite">
-              <div>
-                <div class="cd-label" id="cd-label">Cronômetro 5 min</div>
-                <div class="message" style="margin:0.25rem 0 0;font-size:0.8rem" id="cd-hint">
-                  Inicie o coletor para começar a contagem.
-                </div>
-              </div>
-              <div class="cd-time" id="cd-time">05:00</div>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
-            <div id="retention-banner" class="retention-banner" role="status"></div>
             <div class="status-grid">
               <div class="status-item"><span class="label">Fase</span><span class="value" id="s-phase">—</span></div>
               <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
@@ -340,10 +247,9 @@
               <button type="button" class="btn btn-mode" id="btn-prob-toggle">Desligado</button>
               <span id="prob-line-opts" class="prob-subopts" hidden>
                 <span class="pnf-opts-label">Linhas:</span>
-                <button type="button" class="btn btn-mode active" data-prob-line="5m">5m</button>
-                <button type="button" class="btn btn-mode active" data-prob-line="15m">15m</button>
-                <button type="button" class="btn btn-mode active" data-prob-line="30m">30m</button>
-                <button type="button" class="btn btn-mode active" data-prob-line="1h">1h</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="1w">1 sem</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="1m">1 mês</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="3m">3 meses</button>
                 <span class="pnf-opts-label">Sync:</span>
                 <button type="button" class="btn btn-mode" id="btn-prob-link">Link acum.</button>
               </span>
@@ -363,8 +269,8 @@
             </div>
             <div id="prob-wrap" class="prob-wrap">
               <p class="prob-title" id="prob-title">
-                Probabilidade · saldo negativo (−): close em 5m/15m/30m/1h <strong>acima</strong> do atual ·
-                saldo positivo (+): close em 5m/15m/30m/1h <strong>abaixo</strong> do atual
+                Probabilidade · saldo negativo (−): close em 1 sem / 1 mês / 3 meses <strong>acima</strong> do atual ·
+                saldo positivo (+): close <strong>abaixo</strong> do atual
               </p>
               <p class="prob-title" id="prob-side-hint" style="margin-top:-0.15rem;color:#cbd5e1"></p>
               <div class="chart-wrap chart-wrap--prob">
@@ -374,21 +280,6 @@
           </div>
         </div>
       </main>
-    </div>
-
-    <div id="cleanup-modal" class="cleanup-modal" hidden>
-      <div class="cleanup-card" role="dialog" aria-modal="true" aria-labelledby="cleanup-title">
-        <h3 id="cleanup-title">Limpeza em 24h</h3>
-        <p id="cleanup-text">
-          Em até 1 dia a ferramenta removerá candles 1m com mais de 90 dias.
-          Baixe o CSV agora para não perder os dados.
-        </p>
-        <div class="cleanup-actions">
-          <button type="button" class="btn btn-start" id="btn-dl-atrisk">Baixar em risco</button>
-          <button type="button" class="btn btn-apply" id="btn-dl-all">Baixar tudo</button>
-          <button type="button" class="btn" id="btn-cleanup-dismiss">Entendi</button>
-        </div>
-      </div>
     </div>
 
     <script>
@@ -442,17 +333,16 @@
       const btnProbToggle = document.getElementById("btn-prob-toggle");
       const btnProbLink = document.getElementById("btn-prob-link");
       const probLineOptsEl = document.getElementById("prob-line-opts");
-      const CHART_MODE_KEY = "iq_blitz_ohlc1m_chart_mode";
-      const PNF_SRC_KEY = "iq_blitz_ohlc1m_pnf_src";
-      const PROB_ON_KEY = "iq_blitz_ohlc1m_prob_on";
-      const PROB_LINK_KEY = "iq_blitz_ohlc1m_prob_link";
-      const PROB_LINES_KEY = "iq_blitz_ohlc1m_prob_lines_v2";
+      const CHART_MODE_KEY = "iq_blitz_ohlc_1d_chart_mode";
+      const PNF_SRC_KEY = "iq_blitz_ohlc_1d_pnf_src";
+      const PROB_ON_KEY = "iq_blitz_ohlc_1d_prob_on";
+      const PROB_LINK_KEY = "iq_blitz_ohlc_1d_prob_link";
+      const PROB_LINES_KEY = "iq_blitz_ohlc_1d_prob_lines";
       const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
       const PROB_HORIZONS = [
-        { key: "5m", bars: 5, color: "#22d3ee" },
-        { key: "15m", bars: 15, color: "#a78bfa" },
-        { key: "30m", bars: 30, color: "#fbbf24" },
-        { key: "1h", bars: 60, color: "#34d399" },
+        { key: "1w", bars: 5, color: "#22d3ee" },
+        { key: "1m", bars: 20, color: "#a78bfa" },
+        { key: "3m", bars: 60, color: "#fbbf24" },
       ];
       const PROB_MIN_SAMPLES = 3;
       // 1 ponto = 0.00001 (5 casas). Caixa = 100 pontos. Reversão clássica = 3 caixas.
@@ -465,14 +355,14 @@
       let activeSeries = null;
       let zeroLine = null;
       let probChart = null;
-      let probSeries = { "5m": null, "15m": null, "30m": null, "1h": null };
+      let probSeries = { "1w": null, "1m": null, "3m": null };
       let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
       if (!CHART_MODES.includes(chartMode)) chartMode = "ohlc";
       let pnfSource = localStorage.getItem(PNF_SRC_KEY) || "hl";
       if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
       let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
       let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
-      let probLinesOn = { "5m": true, "15m": true, "30m": true, "1h": true };
+      let probLinesOn = { "1w": true, "1m": true, "3m": true };
       try {
         const savedLines = JSON.parse(localStorage.getItem(PROB_LINES_KEY) || "");
         if (savedLines && typeof savedLines === "object") {
@@ -483,21 +373,13 @@
           }
         }
       } catch (_) {}
-      let lastProbLines = { "5m": [], "15m": [], "30m": [], "1h": [] };
+      let lastProbLines = { "1w": [], "1m": [], "3m": [] };
       let lastCumPoints = [];
       let probLinkBound = false;
       let syncingCharts = false;
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
-      let lastChartFingerprint = "";
-      let lastForcedChartAt = 0;
-      let lastFlatRepairAt = 0;
-      let flatRepairInFlight = false;
-      const AUTO_REPAIR_FLAT_UI = true;
-      const FLAT_REPAIR_COOLDOWN_MS = 120_000;
-      let chartDataMode = null;
-      let chartFittedKey = "";
       let lastMetaText = "";
       let pnfColumns = [];
       const pnfOptsEl = document.getElementById("pnf-opts");
@@ -638,7 +520,7 @@
           });
         }
         // linha 50%
-        probSeries["5m"].createPriceLine({
+        probSeries["1w"].createPriceLine({
           price: 50,
           color: "rgba(148, 163, 184, 0.7)",
           lineWidth: 1,
@@ -653,7 +535,7 @@
         for (const hz of PROB_HORIZONS) {
           if (probLinesOn[hz.key] && probSeries[hz.key]) return probSeries[hz.key];
         }
-        return probSeries["5m"];
+        return probSeries["1w"];
       }
 
       function valueAtTime(points, time) {
@@ -692,7 +574,7 @@
             const price = fromCum
               ? valueAtTime(
                   lastProbLines[
-                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "5m"
+                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "1w"
                   ],
                   param.time
                 )
@@ -750,23 +632,13 @@
       }
 
       function buildOhlcData(candles) {
-        // Doji (sem corpo): cor neutra — evita parecer "positivo" so por close>=open.
-        return candles.map((c) => {
-          const body = Math.abs(c.close - c.open);
-          const bar = {
-            time: c.time,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          };
-          if (body <= 1e-12) {
-            bar.color = "#94a3b8";
-            bar.borderColor = "#94a3b8";
-            bar.wickColor = "#94a3b8";
-          }
-          return bar;
-        });
+        return candles.map((c) => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
       }
 
       /** Corpo/pavios relativos ao open = 0 (positivos acima, negativos abaixo). */
@@ -842,7 +714,7 @@
        * saldo < 0 → P(close[t+h] > close[t])
        * saldo > 0 → P(close[t+h] < close[t])  (inverso)
        * saldo = 0 → P(close[t+h] > close[t])
-       * h em candles de 1m: 5 / 15 / 30 / 60 (= 5m / 15m / 30m / 1h).
+       * h em candles de 1h (1, 4, 8).
        */
       function buildProbByScore(candles, scores, horizonBars) {
         const buckets = new Map(); // score -> {hits, n}
@@ -894,10 +766,10 @@
         ensureChart();
         ensureProbChart();
         bindProbChartLink();
-        if (!probChart || !probSeries["5m"]) return;
+        if (!probChart || !probSeries["1h"]) return;
         if (!rawCandles.length) {
           for (const hz of PROB_HORIZONS) probSeries[hz.key].setData([]);
-          lastProbLines = { "5m": [], "15m": [], "30m": [], "1h": [] };
+          lastProbLines = { "1h": [], "4h": [], "8h": [] };
           lastCumPoints = [];
           return;
         }
@@ -910,10 +782,10 @@
         if (hintEl) {
           if (lastScore > 0) {
             hintEl.textContent =
-              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (5m / 15m / 30m / 1h).`;
+              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (1h / 4h / 8h).`;
           } else if (lastScore < 0) {
             hintEl.textContent =
-              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (5m / 15m / 30m / 1h).`;
+              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (1h / 4h / 8h).`;
           } else {
             hintEl.textContent =
               "Saldo atual: 0 → linhas = % de o close futuro ficar ACIMA do atual.";
@@ -1244,14 +1116,12 @@
         attachZeroLine(activeSeries);
       }
 
-      function applyChartData(opts) {
-        const forceFit = !!(opts && opts.fit);
+      function applyChartData() {
         ensureChart();
         updateIndicators();
         if (chartMode === "pnf") {
           setPnFVisible(true);
           clearSeries();
-          chartDataMode = "pnf";
           if (!rawCandles.length) {
             pnfColumns = [];
             chartMeta.textContent =
@@ -1278,63 +1148,53 @@
           updateProbPanel();
           return;
         }
+        clearSeries();
         if (!rawCandles.length) {
-          clearSeries();
-          chartDataMode = null;
           chartMeta.textContent =
             lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
           updateProbPanel();
           return;
         }
 
-        const modeChanged = chartDataMode !== chartMode || !activeSeries;
-        if (modeChanged) {
-          clearSeries();
-          chartDataMode = chartMode;
-          chartFittedKey = "";
-          if (chartMode === "ohlc") {
-            activeSeries = chart.addCandlestickSeries({
-              upColor: "#22d3ee",
-              downColor: "#f43f5e",
-              borderUpColor: "#22d3ee",
-              borderDownColor: "#f43f5e",
-              wickUpColor: "#22d3ee",
-              wickDownColor: "#f43f5e",
-              priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
-            });
-            activeSeries.setData(buildOhlcData(rawCandles));
-          } else if (chartMode === "signed") {
-            activeSeries = chart.addCandlestickSeries({
-              upColor: "#22d3ee",
-              downColor: "#f43f5e",
-              borderUpColor: "#22d3ee",
-              borderDownColor: "#f43f5e",
-              wickUpColor: "#22d3ee",
-              wickDownColor: "#f43f5e",
-              priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
-            });
-            activeSeries.setData(buildSignedData(rawCandles));
-            attachZeroLine(activeSeries);
-          } else if (chartMode === "cum") {
-            applyLineMode(buildCumData);
-          } else {
-            applyLineMode(buildStreakData);
-          }
-        } else if (chartMode === "ohlc") {
+        if (chartMode === "ohlc") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
           activeSeries.setData(buildOhlcData(rawCandles));
         } else if (chartMode === "signed") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
           activeSeries.setData(buildSignedData(rawCandles));
+          attachZeroLine(activeSeries);
         } else if (chartMode === "cum") {
-          const { points, markers } = buildCumData(rawCandles);
-          activeSeries.setData(points);
-          activeSeries.setMarkers(markers);
+          applyLineMode(buildCumData);
         } else {
-          const { points, markers } = buildStreakData(rawCandles);
-          activeSeries.setData(points);
-          activeSeries.setMarkers(markers);
+          applyLineMode(buildStreakData);
         }
 
-        fitChartIfNeeded(forceFit || modeChanged);
+        resizeChart();
+        chart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        });
+        setTimeout(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        }, 50);
         if (lastMetaText) chartMeta.textContent = lastMetaText;
         updateProbPanel();
       }
@@ -1358,135 +1218,31 @@
       function toChartTime(iso) {
         const ms = Date.parse(iso);
         if (Number.isNaN(ms)) return null;
-        // Alinha ao minuto UTC (evita timestamps "quebrados" da API).
-        return Math.floor(Math.floor(ms / 1000) / 60) * 60;
-      }
-
-      function isFlatCandle(c) {
-        const range = Math.max(c.high, c.open, c.close) - Math.min(c.low, c.open, c.close);
-        return range <= 1e-12;
-      }
-
-      function filterPriceOutliers(candles) {
-        if (candles.length < 20) return candles;
-        const closes = candles.map((c) => c.close).slice().sort((a, b) => a - b);
-        const mid = closes[Math.floor(closes.length / 2)];
-        if (!(mid > 0)) return candles;
-        const ranges = candles
-          .map((c) => c.high - c.low)
-          .slice()
-          .sort((a, b) => a - b);
-        const medRange = ranges[Math.floor(ranges.length / 2)] || mid * 0.0002;
-        const band = Math.max(medRange * 6, mid * 0.00025);
-        const maxDev = mid * 0.004;
-        return candles
-          .filter((c) => {
-            // Remove so preco totalmente absurdo (nao so pavio).
-            return !(
-              Math.abs(c.close - mid) > maxDev && Math.abs(c.open - mid) > maxDev
-            );
-          })
-          .map((c) => {
-            const bodyHi = Math.max(c.open, c.close);
-            const bodyLo = Math.min(c.open, c.close);
-            return {
-              time: c.time,
-              open: c.open,
-              close: c.close,
-              high: Math.max(bodyHi, Math.min(c.high, bodyHi + band)),
-              low: Math.min(bodyLo, Math.max(c.low, bodyLo - band)),
-            };
-          });
+        return Math.floor(ms / 1000);
       }
 
       function rowsToCandles(rows) {
-        const byTime = new Map();
+        const series = [];
+        let prevT = null;
         for (const r of rows) {
           const t = toChartTime(r.opened_at);
           if (t == null) continue;
+          if (prevT != null && t <= prevT) continue;
           const o = Number(r.open);
           const h = Number(r.high);
           const l = Number(r.low);
           const c = Number(r.close);
           if (![o, h, l, c].every(Number.isFinite)) continue;
-          if (o <= 0 || h <= 0 || l <= 0 || c <= 0) continue;
-          byTime.set(t, {
+          series.push({
             time: t,
             open: o,
             high: Math.max(h, o, c),
             low: Math.min(l, o, c),
             close: c,
           });
+          prevT = t;
         }
-        let series = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
-        series = filterPriceOutliers(series);
-        // Esconde o minuto ainda aberto (OHLC incompleto na ponta do grafico).
-        const nowMin = Math.floor(Date.now() / 1000 / 60) * 60;
-        series = series.filter((c) => c.time < nowMin);
         return series;
-      }
-
-      /** Velas ja fechadas no fim com O=H=L=C (dado incompleto / corrompido). */
-      function detectTrailingFlatCorruption(candles) {
-        if (!candles || candles.length < 5) return false;
-        const nowMin = Math.floor(Date.now() / 1000 / 60) * 60;
-        const closed = candles.filter((c) => c.time < nowMin);
-        const tail = closed.slice(-4);
-        if (tail.length < 2) return false;
-        let flatN = 0;
-        for (const c of tail) {
-          if (isFlatCandle(c)) flatN += 1;
-        }
-        return flatN >= 2;
-      }
-
-      async function maybeAutoRepairFlat(asset) {
-        if (!AUTO_REPAIR_FLAT_UI || flatRepairInFlight) return false;
-        if (!detectTrailingFlatCorruption(rawCandles)) return false;
-        const now = Date.now();
-        if (now - lastFlatRepairAt < FLAT_REPAIR_COOLDOWN_MS) return false;
-        lastFlatRepairAt = now;
-        flatRepairInFlight = true;
-        chartMeta.textContent =
-          (lastMetaText || "") +
-          " · Flag flat: re-sync automático dos últimos 15 min…";
-        try {
-          await api("/api/ohlc1m/resync-recent", "POST", {
-            minutes: 15,
-          });
-          return true;
-        } catch (e) {
-          console.warn("auto repair flat falhou", e);
-          return false;
-        } finally {
-          flatRepairInFlight = false;
-        }
-      }
-
-      function fitChartIfNeeded(forceFit) {
-        if (!chart) return;
-        const key = lastChartAsset + "|" + chartMode;
-        if (!forceFit && key === chartFittedKey) {
-          resizeChart();
-          try {
-            chart.timeScale().scrollToRealTime();
-          } catch (_) {
-            /* ignore */
-          }
-          return;
-        }
-        chartFittedKey = key;
-        resizeChart();
-        chart.timeScale().fitContent();
-        requestAnimationFrame(() => {
-          resizeChart();
-          chart.timeScale().fitContent();
-          try {
-            chart.timeScale().scrollToRealTime();
-          } catch (_) {
-            /* ignore */
-          }
-        });
       }
 
       async function loadChart(asset, force) {
@@ -1498,72 +1254,48 @@
         try {
           const q = new URLSearchParams({
             asset: asset || "",
-            timeframe: "1m",
-            limit: "1500",
+            timeframe: "1d",
+            limit: "2000",
           });
-          const data = await api("/api/ohlc1m/candles?" + q.toString());
+          const data = await api("/api/ohlc1d/candles?" + q.toString());
           const rows = data.candles || [];
-          const lastRow = rows.length ? rows[rows.length - 1] : null;
-          const fingerprint = lastRow
-            ? String(lastRow.opened_at) +
-              "|" +
-              String(lastRow.open) +
-              "|" +
-              String(lastRow.high) +
-              "|" +
-              String(lastRow.low) +
-              "|" +
-              String(lastRow.close)
-            : "";
-          const assetChanged = (data.asset || "") !== lastChartAsset;
           if (
             !force &&
             data.asset === lastChartAsset &&
-            rows.length === lastChartCount &&
-            fingerprint === lastChartFingerprint
+            rows.length === lastChartCount
           ) {
             resizeChart();
             return;
           }
           lastChartAsset = data.asset || "";
           lastChartCount = rows.length;
-          lastChartFingerprint = fingerprint;
           if (!rows.length) {
             rawCandles = [];
             lastMetaText =
               "Nenhum candle no Supabase para " +
               (data.asset || asset || "—") +
               ". Inicie o coletor para gravar.";
-            applyChartData({ fit: true });
+            applyChartData();
             return;
           }
           rawCandles = rowsToCandles(rows);
           if (!rawCandles.length) {
             lastMetaText = "Dados OHLC inválidos para o gráfico.";
-            applyChartData({ fit: true });
+            applyChartData();
             return;
           }
-          const firstC = rawCandles[0];
-          const lastC = rawCandles[rawCandles.length - 1];
-          const fmtUnix = (t) => {
-            const d = new Date(t * 1000);
-            return d.toISOString().replace("T", " ").slice(0, 16);
-          };
+          const first = rows[0].opened_at;
+          const last = rows[rows.length - 1].opened_at;
           lastMetaText =
             data.asset +
-            " · 1m · " +
-            rawCandles.length +
+            " · 1d · " +
+            rows.length +
             " velas · " +
-            fmtUnix(firstC.time) +
+            String(first).replace("T", " ").slice(0, 10) +
             " → " +
-            fmtUnix(lastC.time) +
-            " UTC";
-          applyChartData({ fit: assetChanged || force });
-          // Flag: se as velas recentes estiverem flat/corrompidas, re-puxa do DB/Pocket.
-          if (await maybeAutoRepairFlat(data.asset || asset)) {
-            lastChartFingerprint = "";
-            await loadChart(data.asset || asset, true);
-          }
+            String(last).replace("T", " ").slice(0, 10) +
+            " (meia-noite Pocket)";
+          applyChartData();
         } catch (e) {
           chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
         }
@@ -1601,55 +1333,6 @@
         return String(v).replace("T", " ").slice(0, 19) + " UTC";
       }
 
-      let nextFetchAtMs = null;
-      let lastCountdownPhase = "";
-
-      function fmtCountdown(sec) {
-        const s = Math.max(0, Math.floor(sec));
-        const m = Math.floor(s / 60);
-        const r = s % 60;
-        return String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
-      }
-
-      function tickCountdown() {
-        const box = document.getElementById("countdown-box");
-        const timeEl = document.getElementById("cd-time");
-        const labelEl = document.getElementById("cd-label");
-        const hintEl = document.getElementById("cd-hint");
-        if (!box || !timeEl) return;
-
-        const phase = lastCountdownPhase || "";
-        const pulling = ["fetch", "manual_pull", "backfill", "connect", "reconnect"].includes(phase);
-
-        if (pulling) {
-          box.className = "countdown-box cd-pulling";
-          labelEl.textContent = "Puxando dados…";
-          hintEl.textContent = "Mesma lógica do botão Puxar agora (velas fechadas).";
-          timeEl.textContent = "…";
-          return;
-        }
-
-        if (!nextFetchAtMs) {
-          box.className = "countdown-box cd-idle";
-          labelEl.textContent = "Cronômetro 5 min";
-          hintEl.textContent = "Inicie o coletor para começar a contagem.";
-          timeEl.textContent = "05:00";
-          return;
-        }
-
-        const left = (nextFetchAtMs - Date.now()) / 1000;
-        box.className = "countdown-box";
-        labelEl.textContent = "Próxima puxada automática";
-        if (left <= 0) {
-          timeEl.textContent = "00:00";
-          hintEl.textContent = "Zerou — aguardando puxada no servidor…";
-          return;
-        }
-        timeEl.textContent = fmtCountdown(left);
-        hintEl.textContent =
-          "Ao zerar, puxa com a mesma lógica de Puxar agora.";
-      }
-
       function render(st) {
         const running = !!st.running;
         badge.textContent = running ? "COLETANDO" : "STAND-BY";
@@ -1684,90 +1367,12 @@
           ? String(st.updated_at).replace("T", " ").slice(0, 19)
           : "—";
         document.getElementById("s-msg").textContent = st.message || st.error || "";
-        lastCountdownPhase = st.phase || "";
-        if (st.next_fetch_at) {
-          const ms = Date.parse(st.next_fetch_at);
-          nextFetchAtMs = Number.isNaN(ms) ? null : ms;
-        } else if (!running) {
-          nextFetchAtMs = null;
-        }
-        tickCountdown();
-        updateRetentionUI(st);
-      }
-
-      const CLEANUP_DISMISS_KEY = "iq_blitz_ohlc1m_cleanup_dismiss";
-      const cleanupModal = document.getElementById("cleanup-modal");
-      const retentionBanner = document.getElementById("retention-banner");
-
-      function updateRetentionUI(st) {
-        const ret = st.retention || {};
-        const warn = !!ret.warn;
-        const nextDel = ret.next_delete_at
-          ? String(ret.next_delete_at).replace("T", " ").slice(0, 16)
-          : "—";
-        const atRisk = ret.rows_at_risk != null ? ret.rows_at_risk : 0;
-        const toDel = ret.rows_to_delete != null ? ret.rows_to_delete : 0;
-        if (warn) {
-          retentionBanner.classList.add("visible");
-          retentionBanner.textContent =
-            "Aviso de limpeza (90 dias): " +
-            atRisk +
-            " vela(s) na janela de risco · " +
-            toDel +
-            " já elegíveis · próxima exclusão ~ " +
-            nextDel +
-            " UTC. Baixe o CSV abaixo se ainda não salvou.";
-          const dismissed = localStorage.getItem(CLEANUP_DISMISS_KEY) || "";
-          const stamp = String(ret.next_delete_at || ret.delete_before || "warn");
-          if (dismissed !== stamp) {
-            document.getElementById("cleanup-text").textContent =
-              "Em até 1 dia a ferramenta removerá candles 1m com mais de 90 dias" +
-              (atRisk ? " (" + atRisk + " na janela de aviso)" : "") +
-              ". Baixe o CSV agora para não perder os dados.";
-            cleanupModal.hidden = false;
-          }
-        } else {
-          retentionBanner.classList.remove("visible");
-          retentionBanner.textContent = "";
-          cleanupModal.hidden = true;
-        }
-      }
-
-      async function downloadExport(scope) {
-        const token = getToken();
-        const asset = assetInput.value.trim();
-        const q = new URLSearchParams({
-          scope: scope,
-          asset: asset || "",
-        });
-        const res = await fetch("/api/ohlc1m/export?" + q.toString(), {
-          headers: { "X-Control-Token": token },
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.detail || res.statusText || "Falha no download");
-        }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "ohlc_1m_" + (asset || "export") + "_" + scope + ".csv";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
       }
 
       async function refresh() {
-        const st = await api("/api/ohlc1m/status");
+        const st = await api("/api/ohlc1d/status");
         render(st);
-        const running = !!st.running;
-        const now = Date.now();
-        // Com coletor ligado: redesenha no maximo a cada 5 min (mesmo ritmo do fetch).
-        const forceChart =
-          running && now - lastForcedChartAt >= 300_000;
-        if (forceChart) lastForcedChartAt = now;
-        await loadChart(st.asset || assetInput.value.trim(), forceChart);
+        await loadChart(st.asset || assetInput.value.trim(), false);
         return st;
       }
 
@@ -1785,7 +1390,7 @@
 
       document.getElementById("btn-asset").addEventListener("click", async () => {
         try {
-          const st = await api("/api/ohlc1m/asset", "POST", {
+          const st = await api("/api/ohlc1d/asset", "POST", {
             asset: assetInput.value.trim(),
           });
           render(st);
@@ -1798,7 +1403,7 @@
 
       btnStart.addEventListener("click", async () => {
         try {
-          const st = await api("/api/ohlc1m/start", "POST", {
+          const st = await api("/api/ohlc1d/start", "POST", {
             asset: assetInput.value.trim() || undefined,
           });
           render(st);
@@ -1810,7 +1415,7 @@
 
       btnStop.addEventListener("click", async () => {
         try {
-          const st = await api("/api/ohlc1m/stop", "POST");
+          const st = await api("/api/ohlc1d/stop", "POST");
           render(st);
           await loadChart(st.asset, true);
           setCmdErro("");
@@ -1821,41 +1426,45 @@
 
       document.getElementById("btn-pull-now").addEventListener("click", async () => {
         try {
-          setCmdErro("");
-          const btn = document.getElementById("btn-pull-now");
-          btn.disabled = true;
-          const st = await api("/api/ohlc1m/pull-now", "POST", {});
+          const st = await api("/api/ohlc1d/pull-now", "POST");
           render(st);
-          await loadChart(st.asset || assetInput.value.trim(), true);
-          const p = st.pull || {};
-          if (p.upserted === 0) {
-            setCmdErro(
-              "Puxada ok, mas 0 velas. Confira SSID/ativo ou tente de novo."
-            );
-          }
+          await loadChart(st.asset, true);
+          setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
-        } finally {
-          document.getElementById("btn-pull-now").disabled = false;
         }
       });
 
-      document.getElementById("btn-resync-20").addEventListener("click", async () => {
-        if (
-          !confirm(
-            "Apagar os últimos 20 minutos no Supabase e recarregar da Pocket?\n" +
-              "Dados mais antigos permanecem; o upsert não duplica."
-          )
-        ) {
-          return;
-        }
+      document.getElementById("btn-resync").addEventListener("click", async () => {
+        if (!confirm("Apagar os últimos 30 dias no DB e repuxar da Pocket?")) return;
         try {
-          setCmdErro("");
-          const st = await api("/api/ohlc1m/resync-recent", "POST", {
-            minutes: 20,
-          });
+          const st = await api("/api/ohlc1d/resync-recent", "POST", { days: 30 });
           render(st);
-          await loadChart(st.asset || assetInput.value.trim(), true);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-export").addEventListener("click", async () => {
+        try {
+          const asset = assetInput.value.trim();
+          const q = asset ? "?asset=" + encodeURIComponent(asset) : "";
+          const res = await fetch("/api/ohlc1d/export" + q, {
+            headers: { "X-Control-Token": getToken() },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || res.statusText);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "ohlc_1d_" + (asset || "export") + ".csv";
+          a.click();
+          URL.revokeObjectURL(url);
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
@@ -1918,48 +1527,6 @@
         if (appBox.hidden) return;
         refresh().catch(() => {});
       }, 4000);
-
-      setInterval(() => {
-        if (appBox.hidden) return;
-        tickCountdown();
-      }, 250);
-
-      document.getElementById("btn-dl-atrisk").addEventListener("click", async () => {
-        try {
-          await downloadExport("at_risk");
-          setCmdErro("");
-        } catch (e) {
-          setCmdErro(e.message || String(e));
-        }
-      });
-      document.getElementById("btn-dl-all").addEventListener("click", async () => {
-        try {
-          await downloadExport("all");
-          setCmdErro("");
-        } catch (e) {
-          setCmdErro(e.message || String(e));
-        }
-      });
-      document.getElementById("btn-cleanup-dismiss").addEventListener("click", async () => {
-        try {
-          const st = await api("/api/ohlc1m/status");
-          const ret = st.retention || {};
-          const stamp = String(ret.next_delete_at || ret.delete_before || "warn");
-          localStorage.setItem(CLEANUP_DISMISS_KEY, stamp);
-          cleanupModal.hidden = true;
-        } catch (_) {
-          cleanupModal.hidden = true;
-        }
-      });
-
-      document.getElementById("btn-export-csv").addEventListener("click", async () => {
-        try {
-          await downloadExport("all");
-          setCmdErro("");
-        } catch (e) {
-          setCmdErro(e.message || String(e));
-        }
-      });
     </script>
   </body>
 </html>
