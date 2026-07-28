@@ -362,26 +362,39 @@ class OhlcCollector1m:
         upserted = 0
         asset = self._asset
         try:
+            saved_next = None
+            with self._lock:
+                if self.is_running():
+                    saved_next = self._snap.get("next_fetch_at")
             self._set(
                 phase="manual_pull",
                 message="Puxada manual (igual 1a sync / coletor 1h)…",
                 error=None,
+                next_fetch_at=None,
             )
             client = self._connect()
-            upserted = self._upsert_tf(
-                client, asset, "1m", backfill=True, full_history=True
-            )
+            upserted = self._full_pull(client, asset)
             was_running = self.is_running()
-            self._set(
-                phase="fetch" if was_running else "idle",
-                message=(
-                    f"Puxada manual ok: {upserted} velas upsert "
-                    f"(fechadas; sem duplicar no DB)"
-                ),
-            )
+            if was_running:
+                self._set(
+                    phase="waiting",
+                    next_fetch_at=saved_next,
+                    message=(
+                        f"Puxada manual ok: {upserted} velas upsert "
+                        f"(fechadas; sem duplicar no DB)"
+                    ),
+                )
+            else:
+                self._set(
+                    phase="idle",
+                    message=(
+                        f"Puxada manual ok: {upserted} velas upsert "
+                        f"(fechadas; sem duplicar no DB)"
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001
             self._set(
-                phase="error" if not self.is_running() else "fetch",
+                phase="error" if not self.is_running() else "waiting",
                 error=str(exc),
                 message=f"Puxada manual falhou: {exc}",
             )
@@ -396,6 +409,27 @@ class OhlcCollector1m:
             "mode": "first_pull",
         }
         return st
+
+    def _full_pull(self, client: PocketOption, asset: str) -> int:
+        """Mesma logica do botao Puxar agora (historico fechado, upsert)."""
+        return self._upsert_tf(
+            client, asset, "1m", backfill=True, full_history=True
+        )
+
+    def _arm_countdown(self) -> float:
+        """Arma cronometro de 5 min a partir de agora. Retorna segundos de espera."""
+        poll = float(max(_env_int("OHLC_1M_POLL_SECONDS", DEFAULT_POLL_SECONDS), 60))
+        next_at = datetime.now(timezone.utc) + timedelta(seconds=poll)
+        self._set(
+            phase="waiting",
+            poll_mode=f"every_{int(poll) // 60}m",
+            next_fetch_at=next_at.isoformat(),
+            message=(
+                f"Proxima puxada em {int(poll) // 60} min "
+                f"({next_at.strftime('%H:%M:%S')} UTC) — mesma logica de Puxar agora"
+            ),
+        )
+        return poll
 
     def resync_recent(self, minutes: int = 20) -> dict[str, Any]:
         """Apaga os ultimos N minutos no DB e repuxa da Pocket (upsert, sem duplicar)."""
@@ -965,126 +999,88 @@ class OhlcCollector1m:
             time.sleep(min(left, 1.0))
 
     def _wait_for_next_cycle(self) -> None:
-        # Padrao: a cada 5 minutos UTC (:00,:05,:10…), ~10s apos o boundary.
-        # Puxa ~5 velas 1m ja fechadas; a vela aberta no momento nunca e gravada
-        # (OHLC_1M_CLOSED_ONLY + purge do minuto atual).
-        poll = max(_env_int("OHLC_1M_POLL_SECONDS", DEFAULT_POLL_SECONDS), 60)
-        after = _env_int("OHLC_1M_AFTER_MINUTE_SECONDS", 10)
-        align_raw = os.environ.get("OHLC_1M_ALIGN_INTERVAL", "1").strip().lower()
-        align = align_raw not in ("0", "false", "no")
-        # Legado: OHLC_1M_ALIGN_MINUTE=1 forçava 1 min; agora so se POLL=60.
-        legacy = os.environ.get("OHLC_1M_ALIGN_MINUTE", "").strip().lower()
-        if legacy in ("1", "true", "yes") and poll <= 60:
-            wait = seconds_until_next_minute_fetch(after_minute_seconds=after)
-            mode = "minutely"
-        elif align:
-            wait = seconds_until_next_interval_fetch(
-                interval_seconds=poll, after_seconds=after
-            )
-            mode = f"every_{poll // 60}m" if poll % 60 == 0 else f"every_{poll}s"
-        else:
-            wait = float(poll)
-            mode = "poll"
-        next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
-        self._set(
-            phase="waiting",
-            poll_mode=mode,
-            next_fetch_at=next_at.isoformat(),
-            message=(
-                f"Proximo fetch em ~{int(wait)}s "
-                f"({next_at.strftime('%H:%M:%S')} UTC) — "
-                f"bloco ~{poll // 60}m, so velas 1m fechadas"
-            ),
-        )
+        """Espera o cronometro de 5 min (fixo, a partir de agora)."""
+        wait = self._arm_countdown()
         self._sleep_interruptible(wait)
 
     def _run(self) -> None:
         asset = self._asset
         client: PocketOption | None = None
         try:
-            # --- Primeira puxada: igual ao coletor 1h ---
+            # --- Primeira puxada: igual ao botao Puxar agora ---
             self._set(phase="connect", message=f"Conectando Pocket ({asset})…")
             client = self._connect()
             self._refresh_stored()
-            stored = int(self._snap.get("stored_count") or 0)
             self._set(
                 phase="backfill",
-                message=(
-                    f"Sync incremental 1m ({stored} velas no Supabase)…"
-                    if stored > 0
-                    else "Backfill 1m (igual coletor 1h: get_candles)…"
-                ),
+                message="1a puxada (igual Puxar agora)…",
+                next_fetch_at=None,
             )
-            for tf in TIMEFRAMES:
-                if self._stop.is_set():
-                    break
-                try:
-                    n = self._upsert_tf(client, asset, tf, backfill=True)
-                    self._set(
-                        message=(
-                            f"Sync {tf}: {n} velas novas/atualizadas"
-                            if n > 0
-                            else (
-                                f"Sync {tf}: 0 velas — verifique SSID/ativo"
-                            )
-                        )
+            try:
+                n = self._full_pull(client, asset)
+                self._set(
+                    message=(
+                        f"Sync 1m: {n} velas novas/atualizadas"
+                        if n > 0
+                        else "Sync 1m: 0 velas — verifique SSID/ativo"
                     )
-                except Exception as exc:  # noqa: BLE001
-                    with self._lock:
-                        self._snap["per_tf"][tf] = {
-                            "ok": 0,
-                            "err": str(exc)[:200],
-                        }
-                    self._set(message=f"Sync {tf} falhou: {exc}")
+                )
+            except Exception as exc:  # noqa: BLE001
+                with self._lock:
+                    self._snap["per_tf"]["1m"] = {
+                        "ok": 0,
+                        "err": str(exc)[:200],
+                    }
+                self._set(message=f"Sync 1m falhou: {exc}")
 
             self._maybe_cleanup(asset)
-            # Fecha apos a 1a puxada (igual 1h); reconecta a cada ciclo de 5 min.
             self._close_client(client)
             client = None
 
-            # --- Loop: a cada 5 minutos, so velas fechadas ---
+            # --- Loop: a cada 5 min, mesma logica de Puxar agora ---
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
                 if self._stop.is_set():
                     break
+                # Evita colidir com Puxar agora manual.
+                if not self._pull_lock.acquire(blocking=False):
+                    self._set(
+                        message="Puxada manual em andamento — pulando ciclo…"
+                    )
+                    continue
                 try:
                     self._set(
                         phase="fetch",
-                        message=f"Buscando 1m novos ({asset})…",
+                        message=f"Cronometro zerou — puxando (igual Puxar agora)…",
                         next_fetch_at=None,
                     )
                     client = self._connect()
-                    for tf in TIMEFRAMES:
-                        if self._stop.is_set():
-                            break
-                        try:
-                            n = self._upsert_tf(
-                                client, asset, tf, backfill=False
+                    try:
+                        n = self._full_pull(client, asset)
+                        self._set(
+                            message=(
+                                f"Fetch 1m: {n} velas "
+                                f"(logica Puxar agora)"
                             )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        with self._lock:
+                            cur = self._snap["per_tf"].get("1m", {})
+                            self._snap["per_tf"]["1m"] = {
+                                "ok": cur.get("ok", 0),
+                                "err": str(exc)[:200],
+                            }
+                        if is_connection_error(exc):
                             self._set(
-                                message=(
-                                    f"Fetch {tf}: {n} velas "
-                                    f"(desde ultimo salvo)"
-                                )
+                                phase="reconnect",
+                                message=f"Reconectando… ({exc})",
                             )
-                        except Exception as exc:  # noqa: BLE001
-                            with self._lock:
-                                cur = self._snap["per_tf"].get(tf, {})
-                                self._snap["per_tf"][tf] = {
-                                    "ok": cur.get("ok", 0),
-                                    "err": str(exc)[:200],
-                                }
-                            if is_connection_error(exc):
-                                self._set(
-                                    phase="reconnect",
-                                    message=f"Reconectando… ({exc})",
-                                )
-                                self._close_client(client)
-                                time.sleep(3.0)
-                                client = self._connect()
-                                self._upsert_tf(
-                                    client, asset, tf, backfill=False
-                                )
+                            self._close_client(client)
+                            time.sleep(3.0)
+                            client = self._connect()
+                            self._full_pull(client, asset)
+                        else:
+                            self._set(message=f"Fetch 1m falhou: {exc}")
                     if int(time.time()) % 600 < 35:
                         self._maybe_cleanup(asset)
                 except Exception as exc:  # noqa: BLE001
@@ -1092,6 +1088,10 @@ class OhlcCollector1m:
                 finally:
                     self._close_client(client)
                     client = None
+                    try:
+                        self._pull_lock.release()
+                    except RuntimeError:
+                        pass
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error",
