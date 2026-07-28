@@ -1,115 +1,1562 @@
-"""Testes do coletor OHLC diario (sem Pocket/Supabase)."""
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coletor OHLC Diário — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+      .chart-wrap {
+        width: 100%;
+        height: 420px;
+        min-height: 320px;
+        margin-top: 0.75rem;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(34, 211, 238, 0.25);
+        background: #0a1220;
+        position: relative;
+      }
+      #ohlc-chart {
+        width: 100%;
+        height: 100%;
+        min-height: 320px;
+      }
+      #pnf-chart {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: none;
+        cursor: crosshair;
+      }
+      #pnf-chart.visible {
+        display: block;
+      }
+      .chart-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #94a3b8;
+        font-size: 0.95rem;
+        padding: 1rem;
+        text-align: center;
+      }
+      .chart-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .chart-modes .btn-mode,
+      .pnf-opts .btn-mode,
+      .cum-opts .btn-mode {
+        font-size: 0.82rem;
+        padding: 0.35rem 0.7rem;
+        opacity: 0.72;
+      }
+      .chart-modes .btn-mode.active,
+      .pnf-opts .btn-mode.active,
+      .cum-opts .btn-mode.active {
+        opacity: 1;
+        outline: 1px solid rgba(34, 211, 238, 0.55);
+        background: rgba(34, 211, 238, 0.12);
+      }
+      .pnf-opts {
+        display: none;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .pnf-opts.visible {
+        display: flex;
+      }
+      .pnf-opts .pnf-opts-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-right: 0.15rem;
+      }
+      .cum-opts {
+        display: none;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .cum-opts.visible {
+        display: flex;
+      }
+      .cum-opts .pnf-opts-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-right: 0.15rem;
+      }
+      .prob-subopts {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+      }
+      .prob-wrap {
+        display: none;
+        margin-top: 0.65rem;
+      }
+      .prob-wrap.visible {
+        display: block;
+      }
+      .prob-wrap .prob-title {
+        margin: 0 0 0.35rem;
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+      .prob-wrap .prob-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 0.35rem;
+      }
+      .prob-wrap .prob-legend span::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        margin-right: 0.35rem;
+        vertical-align: -1px;
+      }
+      .prob-wrap .lg-1h::before { background: #22d3ee; }
+      .prob-wrap .lg-4h::before { background: #a78bfa; }
+      .prob-wrap .lg-8h::before { background: #fbbf24; }
+      .chart-wrap--prob {
+        height: 200px;
+        min-height: 160px;
+        margin-top: 0;
+      }
+      #prob-chart {
+        width: 100%;
+        height: 100%;
+        min-height: 160px;
+      }
+      .ind-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.55rem 1rem;
+        margin: 0.35rem 0 0.15rem;
+        font-size: 0.88rem;
+        color: #94a3b8;
+      }
+      .ind-stats strong {
+        color: #e2e8f0;
+        font-weight: 600;
+      }
+      .ind-stats .pos { color: #22d3ee; }
+      .ind-stats .neg { color: #f43f5e; }
+    </style>
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack portal-header-stack--with-back">
+              <a class="portal-back-icon" href="/" title="Voltar ao portal" aria-label="Voltar ao portal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </a>
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Coletor OHLC Diário</h1>
+                <p class="portal-header-subtitle">D1 nativo Pocket → Supabase</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
 
-from datetime import date, datetime, timedelta, timezone
-from unittest.mock import patch
+      <main class="portal-main portal-main--wide">
+        <div id="auth-box" class="panel">
+          <h2>Acesso</h2>
+          <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+            Informe o <code>CONTROL_TOKEN</code> configurado no Railway.
+          </p>
+          <div class="token-bar">
+            <input id="token-input" type="password" placeholder="CONTROL_TOKEN" autocomplete="off" />
+            <button type="button" class="btn" id="token-save">Salvar</button>
+          </div>
+          <div id="auth-erro" class="erro" hidden></div>
+        </div>
 
-from bot.ohlc_collector_1d import (
-    PERIOD_D1,
-    TIMEFRAME,
-    aggregate_hourly_to_daily,
-    filter_closed_daily,
-    pocket_day_key,
-    pocket_midnight_utc,
-    seconds_until_next_pocket_daily_fetch,
-)
-from bot.ohlc_store import candles_to_csv
+        <div id="app-box" hidden>
+          <div class="panel">
+            <h2>
+              Controle
+              <span id="run-badge" class="badge badge-off">STAND-BY</span>
+            </h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Ativo <strong>fixo</strong>. Puxa candles <strong>D1 nativos</strong> da Pocket
+              (mesmo timeframe da plataforma). Sync automático todo dia às
+              <strong>00:05</strong> (horário Pocket, ex. UTC−3). Histórico sem limite.
+            </p>
+            <div class="duration-row">
+              <label for="asset-input">Ativo</label>
+              <input id="asset-input" type="text" placeholder="EURUSD_otc" style="min-width:10rem;flex:1" />
+              <button type="button" class="btn btn-apply" id="btn-asset">Aplicar</button>
+            </div>
+            <div class="controls" style="margin-top:0.85rem">
+              <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
+              <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-pull-now">Puxar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-resync">Re-sync 30d</button>
+              <button type="button" class="btn btn-apply" id="btn-export">Download CSV</button>
+              <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
+            </div>
+            <div id="cmd-erro" class="erro" hidden></div>
+            <div class="status-grid">
+              <div class="status-item"><span class="label">Fase</span><span class="value" id="s-phase">—</span></div>
+              <div class="status-item"><span class="label">Ativo</span><span class="value" id="s-asset">—</span></div>
+              <div class="status-item"><span class="label">Supabase</span><span class="value" id="s-sb">—</span></div>
+              <div class="status-item"><span class="label">Salvos (DB)</span><span class="value" id="s-stored">—</span></div>
+              <div class="status-item"><span class="label">Último no DB</span><span class="value" id="s-stored-last">—</span></div>
+              <div class="status-item"><span class="label">Upsert sessão</span><span class="value" id="s-total">—</span></div>
+              <div class="status-item"><span class="label">Último upsert</span><span class="value" id="s-last">—</span></div>
+              <div class="status-item"><span class="label">Próximo fetch</span><span class="value" id="s-next">—</span></div>
+              <div class="status-item"><span class="label">Atualizado</span><span class="value" id="s-upd">—</span></div>
+            </div>
+            <p class="message" id="s-msg"></p>
+          </div>
 
+          <div class="panel">
+            <h2>Gráfico (dados do Supabase)</h2>
+            <div class="chart-modes" role="group" aria-label="Tipo de gráfico">
+              <button type="button" class="btn btn-mode active" data-mode="ohlc">Candles</button>
+              <button type="button" class="btn btn-mode" data-mode="signed">Força vs 0</button>
+              <button type="button" class="btn btn-mode" data-mode="cum">Tipo acum.</button>
+              <button type="button" class="btn btn-mode" data-mode="bodycum">Corpo acum.</button>
+              <button type="button" class="btn btn-mode" data-mode="streak">Cruzamento</button>
+              <button type="button" class="btn btn-mode" data-mode="pnf">Pontos (P)</button>
+            </div>
+            <div id="pnf-opts" class="pnf-opts" role="group" aria-label="Fonte do P&F">
+              <span class="pnf-opts-label">Pontos com:</span>
+              <button type="button" class="btn btn-mode" data-pnf-src="hl">Máx/Mín</button>
+              <button type="button" class="btn btn-mode" data-pnf-src="close">Só fechamento</button>
+            </div>
+            <div id="cum-opts" class="cum-opts" role="group" aria-label="Indicadores do acumulado">
+              <span class="pnf-opts-label">Prob. fechamento:</span>
+              <button type="button" class="btn btn-mode" id="btn-prob-toggle">Desligado</button>
+              <span id="prob-line-opts" class="prob-subopts" hidden>
+                <span class="pnf-opts-label">Linhas:</span>
+                <button type="button" class="btn btn-mode active" data-prob-line="1w">1 sem</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="1m">1 mês</button>
+                <button type="button" class="btn btn-mode active" data-prob-line="3m">3 meses</button>
+                <span class="pnf-opts-label">Sync:</span>
+                <button type="button" class="btn btn-mode" id="btn-prob-link">Link acum.</button>
+              </span>
+            </div>
+            <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
+              —
+            </p>
+            <div class="ind-stats" id="ind-stats" aria-label="Indicadores">
+              <span>Candles: <strong id="ind-total">—</strong></span>
+              <span class="pos">P: <strong id="ind-pos">—</strong></span>
+              <span class="neg">N: <strong id="ind-neg">—</strong></span>
+              <span>Doji: <strong id="ind-doji">—</strong></span>
+            </div>
+            <div class="chart-wrap">
+              <div id="ohlc-chart"></div>
+              <canvas id="pnf-chart" aria-label="Gráfico de Pontos"></canvas>
+            </div>
+            <div id="prob-wrap" class="prob-wrap">
+              <p class="prob-title" id="prob-title">
+                Probabilidade · saldo negativo (−): close em 1 sem / 1 mês / 3 meses <strong>acima</strong> do atual ·
+                saldo positivo (+): close <strong>abaixo</strong> do atual
+              </p>
+              <p class="prob-title" id="prob-side-hint" style="margin-top:-0.15rem;color:#cbd5e1"></p>
+              <div class="chart-wrap chart-wrap--prob">
+                <div id="prob-chart"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
 
-def test_period_d1_is_86400():
-    assert PERIOD_D1 == 86400
-    assert TIMEFRAME == "1d"
+    <script>
+      const TOKEN_KEY = "iq_blitz_control_token";
 
+      function getToken() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
 
-def test_seconds_until_next_pocket_daily_fetch_positive():
-    wait = seconds_until_next_pocket_daily_fetch(
-        hour=0, minute=5, pocket_offset=-10800
-    )
-    assert wait >= 1.0
-    assert wait <= 86400 + 60
+      function setToken(v) {
+        localStorage.setItem(TOKEN_KEY, v);
+      }
 
-
-def test_aggregate_hourly_to_daily_basic():
-    off = 7200
-    h1_open = datetime(2024, 1, 1, 22, 0, tzinfo=timezone.utc)
-    h2_open = h1_open + timedelta(hours=1)
-    hourly = [
-        {
-            "opened_at": h1_open.isoformat(),
-            "open": 1.0,
-            "high": 1.1,
-            "low": 0.9,
-            "close": 1.05,
-        },
-        {
-            "opened_at": h2_open.isoformat(),
-            "open": 1.05,
-            "high": 1.2,
-            "low": 1.0,
-            "close": 1.15,
-        },
-    ]
-    daily = aggregate_hourly_to_daily(
-        hourly,
-        asset="EURUSD_otc",
-        pocket_offset=off,
-        include_today=True,
-    )
-    assert len(daily) == 1
-    assert daily[0]["open"] == 1.0
-    assert daily[0]["high"] == 1.2
-    assert daily[0]["low"] == 0.9
-    assert daily[0]["close"] == 1.15
-    expected_open = pocket_midnight_utc(date(2024, 1, 2), offset=off)
-    assert daily[0]["opened_at"] == expected_open.isoformat()
-
-
-def test_pocket_day_key_utc_minus_3():
-    off = -10800
-    with patch("bot.ohlc_collector_1d.pocket_tz_offset", return_value=off):
-        dt = datetime(2024, 6, 15, 2, 0, tzinfo=timezone.utc)
-        assert pocket_day_key(dt) == "2024-06-14"
-        dt2 = datetime(2024, 6, 15, 3, 0, tzinfo=timezone.utc)
-        assert pocket_day_key(dt2) == "2024-06-15"
-
-
-def test_filter_closed_daily_skips_today():
-    fixed = datetime(2024, 6, 15, 15, 0, tzinfo=timezone.utc)
-    rows = [
-        {
-            "opened_at": (fixed - timedelta(days=1)).isoformat(),
-            "open": 1.0,
-            "high": 1.1,
-            "low": 0.9,
-            "close": 1.05,
-        },
-        {
-            "opened_at": fixed.isoformat(),
-            "open": 1.05,
-            "high": 1.2,
-            "low": 1.0,
-            "close": 1.1,
-        },
-    ]
-    with patch("bot.ohlc_collector_1d.datetime") as mock_dt:
-        mock_dt.now.return_value = fixed
-        mock_dt.fromisoformat = datetime.fromisoformat
-        out = filter_closed_daily(rows)
-    assert len(out) == 1
-
-
-def test_candles_to_csv_header_1d():
-    rows = [
-        {
-            "asset": "EURUSD_otc",
-            "timeframe": "1d",
-            "opened_at": datetime.now(timezone.utc).isoformat(),
-            "open": 1.1,
-            "high": 1.2,
-            "low": 1.0,
-            "close": 1.15,
-            "volume": None,
+      async function api(path, method = "GET", body = null) {
+        const token = getToken();
+        const opts = {
+          method,
+          headers: { "X-Control-Token": token },
+        };
+        if (body != null) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
         }
-    ]
-    csv_text = candles_to_csv(rows)
-    assert "opened_at" in csv_text
-    assert "1d" in csv_text
+        const res = await fetch(path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = data.detail || res.statusText || "Erro";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        return data;
+      }
+
+      const authBox = document.getElementById("auth-box");
+      const appBox = document.getElementById("app-box");
+      const authErro = document.getElementById("auth-erro");
+      const cmdErro = document.getElementById("cmd-erro");
+      const badge = document.getElementById("run-badge");
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const assetInput = document.getElementById("asset-input");
+      const chartEl = document.getElementById("ohlc-chart");
+      const pnfCanvas = document.getElementById("pnf-chart");
+      const chartMeta = document.getElementById("chart-meta");
+      const indTotal = document.getElementById("ind-total");
+      const indPos = document.getElementById("ind-pos");
+      const indNeg = document.getElementById("ind-neg");
+      const indDoji = document.getElementById("ind-doji");
+      const cumOptsEl = document.getElementById("cum-opts");
+      const probWrapEl = document.getElementById("prob-wrap");
+      const probChartEl = document.getElementById("prob-chart");
+      const btnProbToggle = document.getElementById("btn-prob-toggle");
+      const btnProbLink = document.getElementById("btn-prob-link");
+      const probLineOptsEl = document.getElementById("prob-line-opts");
+      const CHART_MODE_KEY = "iq_blitz_ohlc_1d_chart_mode";
+      const PNF_SRC_KEY = "iq_blitz_ohlc_1d_pnf_src";
+      const PROB_ON_KEY = "iq_blitz_ohlc_1d_prob_on";
+      const PROB_LINK_KEY = "iq_blitz_ohlc_1d_prob_link";
+      const PROB_LINES_KEY = "iq_blitz_ohlc_1d_prob_lines";
+      const CHART_MODES = ["ohlc", "signed", "cum", "bodycum", "streak", "pnf"];
+      const PROB_HORIZONS = [
+        { key: "1w", bars: 5, color: "#22d3ee" },
+        { key: "1m", bars: 20, color: "#a78bfa" },
+        { key: "3m", bars: 60, color: "#fbbf24" },
+      ];
+      const PROB_MIN_SAMPLES = 3;
+      // 1 ponto = 0.00001 (5 casas). Caixa = 100 pontos. Reversão clássica = 3 caixas.
+      const PNF_POINT = 0.00001;
+      const PNF_BOX_POINTS = 100;
+      const PNF_BOX = PNF_BOX_POINTS * PNF_POINT;
+      const PNF_REVERSAL = 3;
+
+      let chart = null;
+      let activeSeries = null;
+      let zeroLine = null;
+      let probChart = null;
+      let probSeries = { "1w": null, "1m": null, "3m": null };
+      let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
+      if (!CHART_MODES.includes(chartMode)) chartMode = "ohlc";
+      let pnfSource = localStorage.getItem(PNF_SRC_KEY) || "hl";
+      if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
+      let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
+      let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
+      let probLinesOn = { "1w": true, "1m": true, "3m": true };
+      try {
+        const savedLines = JSON.parse(localStorage.getItem(PROB_LINES_KEY) || "");
+        if (savedLines && typeof savedLines === "object") {
+          for (const hz of PROB_HORIZONS) {
+            if (typeof savedLines[hz.key] === "boolean") {
+              probLinesOn[hz.key] = savedLines[hz.key];
+            }
+          }
+        }
+      } catch (_) {}
+      let lastProbLines = { "1w": [], "1m": [], "3m": [] };
+      let lastCumPoints = [];
+      let probLinkBound = false;
+      let syncingCharts = false;
+      let rawCandles = []; // {time, open, high, low, close}
+      let lastChartAsset = "";
+      let lastChartCount = -1;
+      let lastMetaText = "";
+      let pnfColumns = [];
+      const pnfOptsEl = document.getElementById("pnf-opts");
+
+      function syncModeButtons() {
+        document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.mode === chartMode);
+        });
+        pnfOptsEl.classList.toggle("visible", chartMode === "pnf");
+        pnfOptsEl.querySelectorAll("[data-pnf-src]").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.pnfSrc === pnfSource);
+        });
+        cumOptsEl.classList.toggle("visible", chartMode === "cum");
+        btnProbToggle.classList.toggle("active", probOn);
+        btnProbToggle.textContent = probOn ? "Ligado" : "Desligado";
+        const showLineOpts = chartMode === "cum" && probOn;
+        probLineOptsEl.hidden = !showLineOpts;
+        if (showLineOpts) {
+          probLineOptsEl.querySelectorAll("[data-prob-line]").forEach((btn) => {
+            btn.classList.toggle("active", !!probLinesOn[btn.dataset.probLine]);
+          });
+          btnProbLink.classList.toggle("active", probLinkOn);
+          btnProbLink.textContent = probLinkOn ? "Link ON" : "Link acum.";
+        }
+        updateProbPanel();
+      }
+      syncModeButtons();
+
+      function setPnFVisible(on) {
+        if (on) {
+          pnfCanvas.classList.add("visible");
+          chartEl.style.visibility = "hidden";
+        } else {
+          pnfCanvas.classList.remove("visible");
+          chartEl.style.visibility = "visible";
+        }
+      }
+
+      function resizeChart() {
+        if (chartMode === "pnf") {
+          drawPnF();
+        } else if (chart && chartEl) {
+          const w = Math.max(chartEl.clientWidth || chartEl.parentElement?.clientWidth || 0, 100);
+          const h = Math.max(chartEl.clientHeight || 420, 280);
+          chart.applyOptions({ width: w, height: h });
+        }
+        resizeProbChart();
+      }
+
+      function resizeProbChart() {
+        if (!probChart || !probChartEl || !probWrapEl.classList.contains("visible")) return;
+        const w = Math.max(probChartEl.clientWidth || probChartEl.parentElement?.clientWidth || 0, 100);
+        const h = Math.max(probChartEl.clientHeight || 200, 140);
+        probChart.applyOptions({ width: w, height: h });
+      }
+
+      function clearSeries() {
+        if (!chart) return;
+        if (activeSeries) {
+          try {
+            if (zeroLine && typeof activeSeries.removePriceLine === "function") {
+              activeSeries.removePriceLine(zeroLine);
+            }
+          } catch (_) {}
+          chart.removeSeries(activeSeries);
+          activeSeries = null;
+          zeroLine = null;
+        }
+      }
+
+      function ensureChart() {
+        if (typeof LightweightCharts === "undefined") return;
+        if (chart) {
+          if (chartMode !== "pnf") resizeChart();
+          return;
+        }
+        const w = Math.max(chartEl.clientWidth || 600, 100);
+        const h = Math.max(chartEl.clientHeight || 420, 280);
+        chart = LightweightCharts.createChart(chartEl, {
+          autoSize: false,
+          layout: {
+            background: { color: "#0a1220" },
+            textColor: "#94a3b8",
+          },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: { borderColor: "rgba(34,211,238,0.25)" },
+          timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
+          width: w,
+          height: h,
+        });
+        window.addEventListener("resize", resizeChart);
+        if (typeof ResizeObserver !== "undefined") {
+          new ResizeObserver(() => resizeChart()).observe(chartEl.parentElement || chartEl);
+          if (probChartEl?.parentElement) {
+            new ResizeObserver(() => resizeProbChart()).observe(probChartEl.parentElement);
+          }
+        }
+      }
+
+      function ensureProbChart() {
+        if (typeof LightweightCharts === "undefined" || !probChartEl) return;
+        if (probChart) {
+          resizeProbChart();
+          return;
+        }
+        const w = Math.max(probChartEl.clientWidth || 600, 100);
+        const h = Math.max(probChartEl.clientHeight || 200, 140);
+        probChart = LightweightCharts.createChart(probChartEl, {
+          autoSize: false,
+          layout: {
+            background: { color: "#0a1220" },
+            textColor: "#94a3b8",
+          },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: {
+            borderColor: "rgba(34,211,238,0.25)",
+            scaleMargins: { top: 0.08, bottom: 0.08 },
+          },
+          timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
+          width: w,
+          height: h,
+        });
+        for (const hz of PROB_HORIZONS) {
+          probSeries[hz.key] = probChart.addLineSeries({
+            color: hz.color,
+            lineWidth: 2,
+            priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+            lastValueVisible: true,
+            priceLineVisible: false,
+            title: hz.key,
+            visible: !!probLinesOn[hz.key],
+          });
+        }
+        // linha 50%
+        probSeries["1w"].createPriceLine({
+          price: 50,
+          color: "rgba(148, 163, 184, 0.7)",
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "50%",
+        });
+        bindProbChartLink();
+      }
+
+      function firstVisibleProbSeries() {
+        for (const hz of PROB_HORIZONS) {
+          if (probLinesOn[hz.key] && probSeries[hz.key]) return probSeries[hz.key];
+        }
+        return probSeries["1w"];
+      }
+
+      function valueAtTime(points, time) {
+        if (!points || !points.length || time == null) return null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time === time) return points[i].value;
+        }
+        // fallback: nearest previous
+        let best = null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time <= time) best = points[i].value;
+          else break;
+        }
+        return best;
+      }
+
+      function bindProbChartLink() {
+        if (probLinkBound || !chart || !probChart) return;
+        probLinkBound = true;
+
+        const mirrorCrosshair = (fromCum, param) => {
+          if (!probLinkOn || syncingCharts) return;
+          if (chartMode !== "cum" || !probOn) return;
+          const src = fromCum ? chart : probChart;
+          const dst = fromCum ? probChart : chart;
+          const dstSeries = fromCum ? firstVisibleProbSeries() : activeSeries;
+          if (!dst || !dstSeries) return;
+          syncingCharts = true;
+          try {
+            if (!param || param.time == null) {
+              if (typeof dst.clearCrosshairPosition === "function") {
+                dst.clearCrosshairPosition();
+              }
+              return;
+            }
+            const price = fromCum
+              ? valueAtTime(
+                  lastProbLines[
+                    PROB_HORIZONS.find((h) => probLinesOn[h.key])?.key || "1w"
+                  ],
+                  param.time
+                )
+              : valueAtTime(lastCumPoints, param.time);
+            const y = price == null ? (fromCum ? 50 : 0) : price;
+            if (typeof dst.setCrosshairPosition === "function") {
+              dst.setCrosshairPosition(y, param.time, dstSeries);
+            }
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        chart.subscribeCrosshairMove((param) => mirrorCrosshair(true, param));
+        probChart.subscribeCrosshairMove((param) => mirrorCrosshair(false, param));
+
+        const mirrorRange = (fromCum, range) => {
+          if (!probLinkOn || syncingCharts || !range) return;
+          if (chartMode !== "cum" || !probOn) return;
+          const dst = fromCum ? probChart : chart;
+          if (!dst) return;
+          syncingCharts = true;
+          try {
+            dst.timeScale().setVisibleLogicalRange(range);
+          } catch (_) {
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          mirrorRange(true, range);
+        });
+        probChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          mirrorRange(false, range);
+        });
+      }
+
+      function applyProbLineVisibility() {
+        for (const hz of PROB_HORIZONS) {
+          if (!probSeries[hz.key]) continue;
+          probSeries[hz.key].applyOptions({ visible: !!probLinesOn[hz.key] });
+        }
+      }
+
+      function attachZeroLine(series) {
+        zeroLine = series.createPriceLine({
+          price: 0,
+          color: "rgba(148, 163, 184, 0.85)",
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "0",
+        });
+      }
+
+      function buildOhlcData(candles) {
+        return candles.map((c) => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+      }
+
+      /** Corpo/pavios relativos ao open = 0 (positivos acima, negativos abaixo). */
+      function buildSignedData(candles) {
+        return candles.map((c) => {
+          const body = c.close - c.open;
+          const hi = c.high - c.open;
+          const lo = c.low - c.open;
+          return {
+            time: c.time,
+            open: 0,
+            close: body,
+            high: Math.max(0, body, hi),
+            low: Math.min(0, body, lo),
+          };
+        });
+      }
+
+      /** Acumulado: +1 bullish, -1 bearish (doji não altera). */
+      function buildCumData(candles) {
+        let score = 0;
+        const points = [];
+        const markers = [];
+        for (const c of candles) {
+          if (c.close > c.open) score += 1;
+          else if (c.close < c.open) score -= 1;
+          points.push({ time: c.time, value: score });
+          markers.push({
+            time: c.time,
+            position: "inBar",
+            color: score > 0 ? "#22d3ee" : score < 0 ? "#f43f5e" : "#94a3b8",
+            shape: "circle",
+            size: 2,
+          });
+        }
+        return { points, markers };
+      }
+
+      /** Corpo acum.: Σ(close − open), sem pavios, em preço cru. */
+      function buildBodyCumData(candles) {
+        let sum = 0;
+        const points = [];
+        const markers = [];
+        for (const c of candles) {
+          sum += c.close - c.open;
+          points.push({ time: c.time, value: sum });
+          markers.push({
+            time: c.time,
+            position: "inBar",
+            color: sum > 0 ? "#22d3ee" : sum < 0 ? "#f43f5e" : "#94a3b8",
+            shape: "circle",
+            size: 2,
+          });
+        }
+        return { points, markers };
+      }
+
+      function candlePolarityStats(candles) {
+        let pos = 0;
+        let neg = 0;
+        let doji = 0;
+        for (const c of candles) {
+          if (c.close > c.open) pos += 1;
+          else if (c.close < c.open) neg += 1;
+          else doji += 1;
+        }
+        return { pos, neg, doji, total: candles.length };
+      }
+
+      function updateIndicators() {
+        const st = candlePolarityStats(rawCandles);
+        indTotal.textContent = rawCandles.length ? String(st.total) : "—";
+        indPos.textContent = rawCandles.length ? String(st.pos) : "—";
+        indNeg.textContent = rawCandles.length ? String(st.neg) : "—";
+        indDoji.textContent = rawCandles.length ? String(st.doji) : "—";
+      }
+
+      /** Série do saldo P−N (igual ao gráfico Tipo acum.). */
+      function buildCumScores(candles) {
+        let score = 0;
+        const scores = [];
+        for (const c of candles) {
+          if (c.close > c.open) score += 1;
+          else if (c.close < c.open) score -= 1;
+          scores.push(score);
+        }
+        return scores;
+      }
+
+      /**
+       * Probabilidade histórica condicional ao saldo P−N:
+       * saldo < 0 → P(close[t+h] > close[t])
+       * saldo > 0 → P(close[t+h] < close[t])  (inverso)
+       * saldo = 0 → P(close[t+h] > close[t])
+       * h em candles de 1h (1, 4, 8).
+       */
+      function buildProbByScore(candles, scores, horizonBars) {
+        const buckets = new Map(); // score -> {hits, n}
+        for (let i = 0; i + horizonBars < candles.length; i++) {
+          const s = scores[i];
+          const now = candles[i].close;
+          const fut = candles[i + horizonBars].close;
+          const favorable =
+            s < 0
+              ? fut > now // negativo → sobe
+              : s > 0
+                ? fut < now // positivo → desce (abaixo)
+                : fut > now;
+          let b = buckets.get(s);
+          if (!b) {
+            b = { hits: 0, n: 0 };
+            buckets.set(s, b);
+          }
+          b.n += 1;
+          if (favorable) b.hits += 1;
+        }
+        const rates = new Map();
+        for (const [s, b] of buckets) {
+          if (b.n >= PROB_MIN_SAMPLES) rates.set(s, (100 * b.hits) / b.n);
+        }
+        return rates;
+      }
+
+      function buildProbLines(candles) {
+        const scores = buildCumScores(candles);
+        const out = {};
+        for (const hz of PROB_HORIZONS) {
+          const rates = buildProbByScore(candles, scores, hz.bars);
+          const points = [];
+          for (let i = 0; i < candles.length; i++) {
+            const p = rates.get(scores[i]);
+            if (p == null) continue;
+            points.push({ time: candles[i].time, value: Math.round(p * 10) / 10 });
+          }
+          out[hz.key] = points;
+        }
+        return out;
+      }
+
+      function updateProbPanel() {
+        const show = chartMode === "cum" && probOn;
+        probWrapEl.classList.toggle("visible", show);
+        if (!show) return;
+        ensureChart();
+        ensureProbChart();
+        bindProbChartLink();
+        if (!probChart || !probSeries["1h"]) return;
+        if (!rawCandles.length) {
+          for (const hz of PROB_HORIZONS) probSeries[hz.key].setData([]);
+          lastProbLines = { "1h": [], "4h": [], "8h": [] };
+          lastCumPoints = [];
+          return;
+        }
+        const lines = buildProbLines(rawCandles);
+        lastProbLines = lines;
+        lastCumPoints = buildCumData(rawCandles).points;
+        const scores = buildCumScores(rawCandles);
+        const lastScore = scores.length ? scores[scores.length - 1] : 0;
+        const hintEl = document.getElementById("prob-side-hint");
+        if (hintEl) {
+          if (lastScore > 0) {
+            hintEl.textContent =
+              `Saldo atual: +${lastScore} → linhas = % de o close futuro ficar ABAIXO do atual (1h / 4h / 8h).`;
+          } else if (lastScore < 0) {
+            hintEl.textContent =
+              `Saldo atual: ${lastScore} → linhas = % de o close futuro ficar ACIMA do atual (1h / 4h / 8h).`;
+          } else {
+            hintEl.textContent =
+              "Saldo atual: 0 → linhas = % de o close futuro ficar ACIMA do atual.";
+          }
+        }
+        for (const hz of PROB_HORIZONS) {
+          probSeries[hz.key].setData(lines[hz.key] || []);
+        }
+        applyProbLineVisibility();
+        resizeProbChart();
+        probChart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          resizeProbChart();
+          probChart.timeScale().fitContent();
+          if (probLinkOn && chart) {
+            try {
+              const range = chart.timeScale().getVisibleLogicalRange();
+              if (range) probChart.timeScale().setVisibleLogicalRange(range);
+            } catch (_) {}
+          }
+        });
+      }
+
+      function setProbOn(on) {
+        probOn = !!on;
+        localStorage.setItem(PROB_ON_KEY, probOn ? "1" : "0");
+        syncModeButtons();
+      }
+
+      function setProbLineOn(key, on) {
+        if (!PROB_HORIZONS.some((h) => h.key === key)) return;
+        // não deixar todas desligadas
+        const next = { ...probLinesOn, [key]: !!on };
+        if (!PROB_HORIZONS.some((h) => next[h.key])) return;
+        probLinesOn = next;
+        localStorage.setItem(PROB_LINES_KEY, JSON.stringify(probLinesOn));
+        syncModeButtons();
+        applyProbLineVisibility();
+      }
+
+      function setProbLinkOn(on) {
+        probLinkOn = !!on;
+        localStorage.setItem(PROB_LINK_KEY, probLinkOn ? "1" : "0");
+        syncModeButtons();
+        if (probLinkOn && chart && probChart) {
+          try {
+            const range = chart.timeScale().getVisibleLogicalRange();
+            if (range) {
+              syncingCharts = true;
+              probChart.timeScale().setVisibleLogicalRange(range);
+              syncingCharts = false;
+            }
+          } catch (_) {
+            syncingCharts = false;
+          }
+        } else if (chart && probChart) {
+          try {
+            chart.clearCrosshairPosition();
+            probChart.clearCrosshairPosition();
+          } catch (_) {}
+        }
+      }
+
+      /**
+       * Sequência com cruzamento do zero:
+       * positivo → acima de 0 (+1, +2…); negativo → abaixo (−1, −2…).
+       * Ao mudar de lado, reinicia em ±1 (cruza a linha 0).
+       */
+      function buildStreakData(candles) {
+        let score = 0;
+        const points = [];
+        const markers = [];
+        for (const c of candles) {
+          if (c.close > c.open) {
+            score = score > 0 ? score + 1 : 1;
+          } else if (c.close < c.open) {
+            score = score < 0 ? score - 1 : -1;
+          }
+          points.push({ time: c.time, value: score });
+          markers.push({
+            time: c.time,
+            position: "inBar",
+            color: score > 0 ? "#22d3ee" : score < 0 ? "#f43f5e" : "#94a3b8",
+            shape: "circle",
+            size: 2,
+          });
+        }
+        return { points, markers };
+      }
+
+      /** Ponto & Figura a partir de OHLC (high-low; aproximação sem ticks). */
+      function buildPnFColumnsHL(candles, boxSize, reversal) {
+        const cols = [];
+        let dir = 0;
+        let top = 0;
+        let bot = 0;
+
+        const toBox = (price) => Math.floor(price / boxSize + 1e-12);
+
+        for (const c of candles) {
+          const hi = toBox(c.high);
+          const lo = toBox(c.low);
+          if (hi < lo) continue;
+
+          if (dir === 0) {
+            if (hi === lo) continue;
+            if (c.close >= c.open) {
+              cols.push({ dir: 1, low: lo, high: hi });
+              dir = 1;
+              top = hi;
+              bot = lo;
+            } else {
+              cols.push({ dir: -1, low: lo, high: hi });
+              dir = -1;
+              top = hi;
+              bot = lo;
+            }
+            continue;
+          }
+
+          if (dir === 1) {
+            if (hi > top) {
+              top = hi;
+              cols[cols.length - 1].high = top;
+            }
+            if (lo <= top - reversal) {
+              const newHigh = top - 1;
+              const newLow = lo;
+              cols.push({ dir: -1, low: newLow, high: newHigh });
+              dir = -1;
+              top = newHigh;
+              bot = newLow;
+            }
+          } else {
+            if (lo < bot) {
+              bot = lo;
+              cols[cols.length - 1].low = bot;
+            }
+            if (hi >= bot + reversal) {
+              const newLow = bot + 1;
+              const newHigh = hi;
+              cols.push({ dir: 1, low: newLow, high: newHigh });
+              dir = 1;
+              bot = newLow;
+              top = newHigh;
+            }
+          }
+        }
+        return cols.filter((col) => col.high >= col.low);
+      }
+
+      /** Ponto & Figura só com fechamentos (close-only). */
+      function buildPnFColumnsClose(candles, boxSize, reversal) {
+        const cols = [];
+        let dir = 0;
+        let top = 0;
+        let bot = 0;
+        let seed = null;
+        const toBox = (price) => Math.floor(price / boxSize + 1e-12);
+
+        for (const c of candles) {
+          const box = toBox(c.close);
+
+          if (dir === 0) {
+            if (seed == null) {
+              seed = box;
+              continue;
+            }
+            if (box > seed) {
+              cols.push({ dir: 1, low: seed + 1, high: box });
+              dir = 1;
+              top = box;
+              bot = seed + 1;
+            } else if (box < seed) {
+              cols.push({ dir: -1, low: box, high: seed - 1 });
+              dir = -1;
+              top = seed - 1;
+              bot = box;
+            }
+            continue;
+          }
+
+          if (dir === 1) {
+            if (box > top) {
+              top = box;
+              cols[cols.length - 1].high = top;
+            } else if (box <= top - reversal) {
+              cols.push({ dir: -1, low: box, high: top - 1 });
+              dir = -1;
+              top = top - 1;
+              bot = box;
+            }
+          } else if (box < bot) {
+            bot = box;
+            cols[cols.length - 1].low = bot;
+          } else if (box >= bot + reversal) {
+            cols.push({ dir: 1, low: bot + 1, high: box });
+            dir = 1;
+            bot = bot + 1;
+            top = box;
+          }
+        }
+        return cols.filter((col) => col.high >= col.low);
+      }
+
+      function buildPnFColumns(candles, boxSize, reversal) {
+        return pnfSource === "close"
+          ? buildPnFColumnsClose(candles, boxSize, reversal)
+          : buildPnFColumnsHL(candles, boxSize, reversal);
+      }
+
+      function drawPnF() {
+        const wrap = pnfCanvas.parentElement;
+        const cssW = Math.max(wrap?.clientWidth || 600, 100);
+        const cssH = Math.max(wrap?.clientHeight || 420, 280);
+        const dpr = window.devicePixelRatio || 1;
+        pnfCanvas.width = Math.floor(cssW * dpr);
+        pnfCanvas.height = Math.floor(cssH * dpr);
+        pnfCanvas.style.width = cssW + "px";
+        pnfCanvas.style.height = cssH + "px";
+        const ctx = pnfCanvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = "#0a1220";
+        ctx.fillRect(0, 0, cssW, cssH);
+
+        if (!pnfColumns.length) {
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = "14px sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("Sem colunas P&F (caixa grande demais para o range?)", cssW / 2, cssH / 2);
+          return;
+        }
+
+        let minBox = Infinity;
+        let maxBox = -Infinity;
+        for (const col of pnfColumns) {
+          minBox = Math.min(minBox, col.low);
+          maxBox = Math.max(maxBox, col.high);
+        }
+        // margem visual
+        minBox -= 1;
+        maxBox += 1;
+        const nRows = maxBox - minBox + 1;
+        const nCols = pnfColumns.length;
+        const padL = 12;
+        const padR = 72;
+        const padT = 28;
+        const padB = 28;
+        const plotW = cssW - padL - padR;
+        const plotH = cssH - padT - padB;
+        const cellW = Math.max(10, Math.min(28, plotW / Math.max(nCols, 1)));
+        const cellH = Math.max(10, Math.min(28, plotH / Math.max(nRows, 1)));
+        const gridW = cellW * nCols;
+        const gridH = cellH * nRows;
+        const originX = padL + Math.max(0, (plotW - gridW) / 2);
+        const originY = padT + Math.max(0, (plotH - gridH) / 2);
+
+        // grid
+        ctx.strokeStyle = "rgba(34,211,238,0.08)";
+        ctx.lineWidth = 1;
+        for (let r = 0; r <= nRows; r++) {
+          const y = originY + r * cellH;
+          ctx.beginPath();
+          ctx.moveTo(originX, y);
+          ctx.lineTo(originX + gridW, y);
+          ctx.stroke();
+        }
+        for (let c = 0; c <= nCols; c++) {
+          const x = originX + c * cellW;
+          ctx.beginPath();
+          ctx.moveTo(x, originY);
+          ctx.lineTo(x, originY + gridH);
+          ctx.stroke();
+        }
+
+        const fontSize = Math.max(9, Math.min(cellW, cellH) * 0.72);
+        ctx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        for (let ci = 0; ci < nCols; ci++) {
+          const col = pnfColumns[ci];
+          const sym = col.dir === 1 ? "X" : "O";
+          ctx.fillStyle = col.dir === 1 ? "#22d3ee" : "#f43f5e";
+          for (let b = col.low; b <= col.high; b++) {
+            const rowFromTop = maxBox - b;
+            const x = originX + ci * cellW + cellW / 2;
+            const y = originY + rowFromTop * cellH + cellH / 2;
+            ctx.fillText(sym, x, y);
+          }
+        }
+
+        // eixo de preço (direita)
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        const labelStep = Math.max(1, Math.ceil(nRows / 8));
+        for (let b = minBox; b <= maxBox; b += labelStep) {
+          const rowFromTop = maxBox - b;
+          const y = originY + rowFromTop * cellH + cellH / 2;
+          const price = (b * PNF_BOX).toFixed(5);
+          ctx.fillText(price, originX + gridW + 8, y);
+        }
+
+        ctx.fillStyle = "#64748b";
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(
+          `P&F · ${pnfSource === "close" ? "só fechamento" : "máx/mín"} · caixa ${PNF_BOX_POINTS} pts (${PNF_BOX}) · rev ${PNF_REVERSAL} · eixo X = colunas`,
+          padL,
+          8
+        );
+      }
+
+      function applyLineMode(builder, priceFormat) {
+        activeSeries = chart.addLineSeries({
+          color: "#94a3b8",
+          lineWidth: 2,
+          priceFormat: priceFormat || {
+            type: "price",
+            precision: 0,
+            minMove: 1,
+          },
+          lastValueVisible: true,
+          priceLineVisible: false,
+        });
+        const { points, markers } = builder(rawCandles);
+        activeSeries.setData(points);
+        activeSeries.setMarkers(markers);
+        attachZeroLine(activeSeries);
+      }
+
+      function applyChartData() {
+        ensureChart();
+        updateIndicators();
+        if (chartMode === "pnf") {
+          setPnFVisible(true);
+          clearSeries();
+          if (!rawCandles.length) {
+            pnfColumns = [];
+            chartMeta.textContent =
+              lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
+            drawPnF();
+            updateProbPanel();
+            return;
+          }
+          pnfColumns = buildPnFColumns(rawCandles, PNF_BOX, PNF_REVERSAL);
+          drawPnF();
+          const base = lastMetaText || "";
+          chartMeta.textContent =
+            base +
+            ` · P&F ${pnfColumns.length} colunas · ${
+              pnfSource === "close" ? "só fechamento" : "máx/mín"
+            } · caixa ${PNF_BOX_POINTS} pts · rev ${PNF_REVERSAL}`;
+          updateProbPanel();
+          return;
+        }
+
+        setPnFVisible(false);
+        if (!chart) {
+          chartMeta.textContent = "Biblioteca de gráfico indisponível.";
+          updateProbPanel();
+          return;
+        }
+        clearSeries();
+        if (!rawCandles.length) {
+          chartMeta.textContent =
+            lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
+          updateProbPanel();
+          return;
+        }
+
+        if (chartMode === "ohlc") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          activeSeries.setData(buildOhlcData(rawCandles));
+        } else if (chartMode === "signed") {
+          activeSeries = chart.addCandlestickSeries({
+            upColor: "#22d3ee",
+            downColor: "#f43f5e",
+            borderUpColor: "#22d3ee",
+            borderDownColor: "#f43f5e",
+            wickUpColor: "#22d3ee",
+            wickDownColor: "#f43f5e",
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          activeSeries.setData(buildSignedData(rawCandles));
+          attachZeroLine(activeSeries);
+        } else if (chartMode === "cum") {
+          applyLineMode(buildCumData);
+        } else if (chartMode === "bodycum") {
+          applyLineMode(buildBodyCumData, {
+            type: "price",
+            precision: 5,
+            minMove: 0.00001,
+          });
+        } else {
+          applyLineMode(buildStreakData);
+        }
+
+        resizeChart();
+        chart.timeScale().fitContent();
+        requestAnimationFrame(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        });
+        setTimeout(() => {
+          resizeChart();
+          chart.timeScale().fitContent();
+        }, 50);
+        if (lastMetaText) chartMeta.textContent = lastMetaText;
+        updateProbPanel();
+      }
+
+      function setChartMode(mode) {
+        if (!CHART_MODES.includes(mode)) return;
+        chartMode = mode;
+        localStorage.setItem(CHART_MODE_KEY, mode);
+        syncModeButtons();
+        applyChartData();
+      }
+
+      function setPnFSource(src) {
+        if (!["hl", "close"].includes(src)) return;
+        pnfSource = src;
+        localStorage.setItem(PNF_SRC_KEY, src);
+        syncModeButtons();
+        if (chartMode === "pnf") applyChartData();
+      }
+
+      function toChartTime(iso) {
+        const ms = Date.parse(iso);
+        if (Number.isNaN(ms)) return null;
+        return Math.floor(ms / 1000);
+      }
+
+      function rowsToCandles(rows) {
+        const series = [];
+        let prevT = null;
+        for (const r of rows) {
+          const t = toChartTime(r.opened_at);
+          if (t == null) continue;
+          if (prevT != null && t <= prevT) continue;
+          const o = Number(r.open);
+          const h = Number(r.high);
+          const l = Number(r.low);
+          const c = Number(r.close);
+          if (![o, h, l, c].every(Number.isFinite)) continue;
+          series.push({
+            time: t,
+            open: o,
+            high: Math.max(h, o, c),
+            low: Math.min(l, o, c),
+            close: c,
+          });
+          prevT = t;
+        }
+        return series;
+      }
+
+      async function loadChart(asset, force) {
+        ensureChart();
+        if (!chart) {
+          chartMeta.textContent = "Biblioteca de gráfico indisponível.";
+          return;
+        }
+        try {
+          const q = new URLSearchParams({
+            asset: asset || "",
+            timeframe: "1d",
+            limit: "0",
+          });
+          const data = await api("/api/ohlc1d/candles?" + q.toString());
+          const rows = data.candles || [];
+          if (
+            !force &&
+            data.asset === lastChartAsset &&
+            rows.length === lastChartCount
+          ) {
+            resizeChart();
+            return;
+          }
+          lastChartAsset = data.asset || "";
+          lastChartCount = rows.length;
+          if (!rows.length) {
+            rawCandles = [];
+            lastMetaText =
+              "Nenhum candle no Supabase para " +
+              (data.asset || asset || "—") +
+              ". Inicie o coletor para gravar.";
+            applyChartData();
+            return;
+          }
+          rawCandles = rowsToCandles(rows);
+          if (!rawCandles.length) {
+            lastMetaText = "Dados OHLC inválidos para o gráfico.";
+            applyChartData();
+            return;
+          }
+          const first = rows[0].opened_at;
+          const last = rows[rows.length - 1].opened_at;
+          lastMetaText =
+            data.asset +
+            " · 1d · " +
+            rows.length +
+            " velas · " +
+            String(first).replace("T", " ").slice(0, 10) +
+            " → " +
+            String(last).replace("T", " ").slice(0, 10) +
+            " (meia-noite Pocket)";
+          applyChartData();
+        } catch (e) {
+          chartMeta.textContent = "Erro ao carregar gráfico: " + (e.message || e);
+        }
+      }
+
+      function showAuth(err) {
+        authBox.hidden = false;
+        appBox.hidden = true;
+        if (err) {
+          authErro.hidden = false;
+          authErro.textContent = err;
+        } else {
+          authErro.hidden = true;
+        }
+      }
+
+      function showApp() {
+        authBox.hidden = true;
+        appBox.hidden = false;
+        authErro.hidden = true;
+      }
+
+      function setCmdErro(msg) {
+        if (!msg) {
+          cmdErro.hidden = true;
+          cmdErro.textContent = "";
+          return;
+        }
+        cmdErro.hidden = false;
+        cmdErro.textContent = msg;
+      }
+
+      function fmtTs(v) {
+        if (!v) return "—";
+        return String(v).replace("T", " ").slice(0, 19) + " UTC";
+      }
+
+      function render(st) {
+        const running = !!st.running;
+        badge.textContent = running ? "COLETANDO" : "STAND-BY";
+        badge.className = "badge " + (running ? "badge-on" : "badge-off");
+        btnStart.disabled = running;
+        btnStop.disabled = !running;
+        assetInput.disabled = running;
+        if (!running && st.asset && document.activeElement !== assetInput) {
+          assetInput.value = st.asset;
+        }
+        document.getElementById("s-phase").textContent = st.phase || "—";
+        document.getElementById("s-asset").textContent = st.asset || "—";
+        document.getElementById("s-sb").textContent = st.supabase_ok
+          ? "ok"
+          : (st.supabase_msg || "não configurado");
+        const stored = st.stored_count;
+        document.getElementById("s-stored").textContent =
+          stored != null
+            ? String(stored)
+            : st.stored_err
+              ? "erro"
+              : "—";
+        document.getElementById("s-stored-last").textContent = fmtTs(st.stored_last);
+        document.getElementById("s-last").textContent =
+          st.last_upsert != null ? String(st.last_upsert) : "—";
+        document.getElementById("s-total").textContent =
+          st.total_upserted != null ? String(st.total_upserted) : "—";
+        document.getElementById("s-next").textContent = st.next_fetch_at
+          ? fmtTs(st.next_fetch_at)
+          : "—";
+        document.getElementById("s-upd").textContent = st.updated_at
+          ? String(st.updated_at).replace("T", " ").slice(0, 19)
+          : "—";
+        document.getElementById("s-msg").textContent = st.message || st.error || "";
+      }
+
+      async function refresh() {
+        const st = await api("/api/ohlc1d/status");
+        render(st);
+        await loadChart(st.asset || assetInput.value.trim(), false);
+        return st;
+      }
+
+      document.getElementById("token-save").addEventListener("click", async () => {
+        setToken(document.getElementById("token-input").value.trim());
+        try {
+          // Mostrar o painel antes do gráfico (senão clientWidth/Height = 0).
+          showApp();
+          await refresh();
+          setCmdErro("");
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-asset").addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc1d/asset", "POST", {
+            asset: assetInput.value.trim(),
+          });
+          render(st);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStart.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc1d/start", "POST", {
+            asset: assetInput.value.trim() || undefined,
+          });
+          render(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStop.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc1d/stop", "POST");
+          render(st);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-pull-now").addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc1d/pull-now", "POST");
+          render(st);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-resync").addEventListener("click", async () => {
+        if (!confirm("Apagar os últimos 30 dias no DB e repuxar da Pocket?")) return;
+        try {
+          const st = await api("/api/ohlc1d/resync-recent", "POST", { days: 30 });
+          render(st);
+          await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-export").addEventListener("click", async () => {
+        try {
+          const asset = assetInput.value.trim();
+          const q = asset ? "?asset=" + encodeURIComponent(asset) : "";
+          const res = await fetch("/api/ohlc1d/export" + q, {
+            headers: { "X-Control-Token": getToken() },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || res.statusText);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "ohlc_1d_" + (asset || "export") + ".csv";
+          a.click();
+          URL.revokeObjectURL(url);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-reload-chart").addEventListener("click", async () => {
+        try {
+          await loadChart(assetInput.value.trim(), true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.querySelectorAll(".chart-modes .btn-mode").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          setChartMode(btn.dataset.mode);
+        });
+      });
+
+      pnfOptsEl.querySelectorAll("[data-pnf-src]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          setPnFSource(btn.dataset.pnfSrc);
+        });
+      });
+
+      btnProbToggle.addEventListener("click", () => {
+        setProbOn(!probOn);
+      });
+
+      probLineOptsEl.querySelectorAll("[data-prob-line]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.dataset.probLine;
+          setProbLineOn(key, !probLinesOn[key]);
+        });
+      });
+
+      btnProbLink.addEventListener("click", () => {
+        setProbLinkOn(!probLinkOn);
+      });
+
+      (async () => {
+        const t = getToken();
+        if (t) document.getElementById("token-input").value = t;
+        if (!t) {
+          showAuth();
+          return;
+        }
+        try {
+          // Painel visível antes de criar o chart (evita canvas 0×0).
+          showApp();
+          await refresh();
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      })();
+
+      setInterval(() => {
+        if (appBox.hidden) return;
+        refresh().catch(() => {});
+      }, 4000);
+    </script>
+  </body>
+</html>
