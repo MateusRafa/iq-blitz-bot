@@ -176,10 +176,13 @@ def ohlc_stop(_: None = Depends(require_token)) -> dict:
 def ohlc_candles(
     asset: str | None = None,
     timeframe: str = "1h",
-    limit: int = 200,
+    limit: int = 0,
     _: None = Depends(require_token),
 ) -> dict:
-    """Candles salvos no Supabase (para o grafico da ferramenta)."""
+    """Candles salvos no Supabase (para o grafico da ferramenta).
+
+    limit=0 (padrao): todas as velas do asset no DB.
+    """
     if timeframe != "1h":
         raise HTTPException(status_code=400, detail="Timeframe suportado: 1h")
     a = normalize_asset(asset or collector.status().get("asset") or "EURUSD_otc")
@@ -192,6 +195,7 @@ def ohlc_candles(
         "timeframe": timeframe,
         "count": len(rows),
         "candles": rows,
+        "scope": "all" if limit <= 0 else "recent",
     }
 
 
@@ -233,9 +237,10 @@ def ohlc1d_stop(_: None = Depends(require_token)) -> dict:
 def ohlc1d_candles(
     asset: str | None = None,
     timeframe: str = "1d",
-    limit: int = 2000,
+    limit: int = 0,
     _: None = Depends(require_token),
 ) -> dict:
+    """Candles D1 do Supabase. limit=0: historico completo."""
     if timeframe != "1d":
         raise HTTPException(status_code=400, detail="Timeframe suportado: 1d")
     a = normalize_asset(
@@ -252,6 +257,7 @@ def ohlc1d_candles(
         "timeframe": timeframe,
         "count": len(rows),
         "candles": rows,
+        "scope": "all" if limit <= 0 else "recent",
     }
 
 
