@@ -19,7 +19,6 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 
 from bot.ohlc_collector import normalize_candle
 from bot.ohlc_store import (
-    TABLE_1D,
     delete_candles_since,
     last_opened_at,
     stored_summary,
@@ -31,6 +30,7 @@ from bot.runner import is_connection_error, load_ssid, normalize_asset
 T = TypeVar("T")
 
 TIMEFRAME = "1d"
+TABLE_1D = "ohlc_candles_1d"
 PERIOD_D1 = 86400
 SOURCE_TF = "1h"
 SOURCE_PERIOD = 3600
