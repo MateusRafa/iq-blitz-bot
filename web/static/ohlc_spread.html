@@ -20,6 +20,15 @@
       .chart-wrap--spread {
         height: 200px;
         min-height: 160px;
+        position: relative;
+      }
+      #spread-open-lines {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 2;
       }
       .chart-wrap--half {
         height: 220px;
@@ -76,6 +85,7 @@
       .lg-eu::before { background: #fbbf24; }
       .lg-spread::before { background: #a78bfa; }
       .lg-wknd::before { background: #f43f5e; }
+      .lg-open::before { background: #22d3ee; }
       .chart-label {
         font-size: 0.8rem;
         color: #94a3b8;
@@ -125,8 +135,8 @@
               <code>ohlc_candles_eurusd</code>. O OTC continua no coletor
               <a href="/ohlc" style="color:#22d3ee">/ohlc</a>
               (tabela <code>ohlc_candles</code>).
-              No fim de semana o spread usa o último close de sexta do EURUSD
-              vs cada vela OTC de sáb/dom.
+              Após o fechamento diário (e no fim de semana) o spread usa o
+              último close do EURUSD vs cada vela OTC ainda aberta.
             </p>
             <div class="controls">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar coleta</button>
@@ -141,7 +151,8 @@
               <div class="status-item"><span class="label">OTC salvos</span><span class="value" id="s-otc">—</span></div>
               <div class="status-item"><span class="label">OTC coletor</span><span class="value" id="s-otc-run">—</span></div>
               <div class="status-item"><span class="label">Spread pts</span><span class="value" id="s-spread">—</span></div>
-              <div class="status-item"><span class="label">Fim de semana</span><span class="value" id="s-wknd">—</span></div>
+              <div class="status-item"><span class="label">Fora do horário</span><span class="value" id="s-wknd">—</span></div>
+              <div class="status-item"><span class="label">Aberturas</span><span class="value" id="s-opens">—</span></div>
             </div>
             <p class="message" id="s-msg"></p>
           </div>
@@ -171,9 +182,13 @@
             <h2 style="margin-top:1.25rem">Spread (OTC − EURUSD)</h2>
             <div class="legend">
               <span class="lg-spread">Spread</span>
-              <span class="lg-wknd">carry / fim de semana</span>
+              <span class="lg-wknd">fora do horário EURUSD</span>
+              <span class="lg-open">abertura EURUSD</span>
             </div>
-            <div class="chart-wrap chart-wrap--spread" id="spread-chart"></div>
+            <div class="chart-wrap chart-wrap--spread" id="spread-chart-wrap">
+              <div id="spread-chart" style="width:100%;height:100%"></div>
+              <canvas id="spread-open-lines" aria-hidden="true"></canvas>
+            </div>
           </div>
         </div>
       </main>
@@ -232,6 +247,8 @@
       let seriesSpread = null;
       let seriesWeekend = null;
       let lastMeta = "";
+      let eurusdOpens = [];
+      let openLinesBound = false;
 
       function showAuth(err) {
         authBox.hidden = false;
@@ -346,8 +363,54 @@
             axisLabelVisible: true,
             title: "0",
           });
+          bindOpenLines();
         }
         return true;
+      }
+
+      function bindOpenLines() {
+        if (openLinesBound || !spreadChart) return;
+        openLinesBound = true;
+        const redraw = () => drawEurusdOpenLines();
+        spreadChart.timeScale().subscribeVisibleLogicalRangeChange(redraw);
+        spreadChart.timeScale().subscribeVisibleTimeRangeChange(redraw);
+        window.addEventListener("resize", redraw);
+      }
+
+      function drawEurusdOpenLines() {
+        const canvas = document.getElementById("spread-open-lines");
+        const wrap = document.getElementById("spread-chart-wrap");
+        const el = document.getElementById("spread-chart");
+        if (!canvas || !wrap || !spreadChart || !el) return;
+        const w = Math.max(wrap.clientWidth || el.clientWidth || 0, 1);
+        const h = Math.max(wrap.clientHeight || el.clientHeight || 0, 1);
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        const ts = spreadChart.timeScale();
+        ctx.strokeStyle = "rgba(34, 211, 238, 0.85)";
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([5, 4]);
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "rgba(34, 211, 238, 0.95)";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        for (const open of eurusdOpens) {
+          const x = ts.timeToCoordinate(open.time);
+          if (x == null || x < 0 || x > w) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+          ctx.fillText("Abertura", x + 4, 6);
+        }
+        ctx.setLineDash([]);
       }
 
       function resizeAll() {
@@ -359,11 +422,12 @@
         ]) {
           if (!chart) continue;
           const el = document.getElementById(id);
-          if (!el || el.offsetParent === null && id !== "spread-chart") continue;
+          if (!el || (el.offsetParent === null && id !== "spread-chart")) continue;
           const w = Math.max(el.clientWidth || 100, 100);
           const h = Math.max(el.clientHeight || 160, 140);
           chart.applyOptions({ width: w, height: h });
         }
+        drawEurusdOpenLines();
       }
 
       function syncLayoutButtons() {
@@ -398,20 +462,31 @@
         seriesOtcSplit.setData(otc);
         seriesEuSplit.setData(eu);
 
-        const paired = [];
         const weekend = [];
         for (const p of data.spread || []) {
           const pt = { time: p.time, value: p.spread };
-          if (p.weekend || p.mode === "carry") weekend.push(pt);
-          else paired.push(pt);
+          if (p.after_hours || p.weekend || p.mode === "carry") weekend.push(pt);
         }
-        // Linha continua: junta tudo na seriesSpread; weekend tambem marcado
         const allSpread = (data.spread || []).map((p) => ({
           time: p.time,
           value: p.spread,
         }));
         seriesSpread.setData(allSpread);
         seriesWeekend.setData(weekend);
+
+        eurusdOpens = (data.eurusd_opens || []).map((o) => ({
+          time: o.time,
+        }));
+        const markers = eurusdOpens.map((o) => ({
+          time: o.time,
+          position: "aboveBar",
+          color: "#22d3ee",
+          shape: "arrowDown",
+          text: "Open",
+        }));
+        try {
+          seriesSpread.setMarkers(markers);
+        } catch (_) {}
 
         lastMeta =
           (data.otc_asset || "OTC") +
@@ -424,19 +499,28 @@
           " velas · spread " +
           allSpread.length +
           " (" +
-          (data.weekend_points || 0) +
-          " carry/fds)";
+          (data.after_hours_points != null
+            ? data.after_hours_points
+            : data.weekend_points || 0) +
+          " fora do horário · " +
+          eurusdOpens.length +
+          " aberturas)";
         document.getElementById("chart-meta").textContent = lastMeta;
         document.getElementById("s-spread").textContent = String(allSpread.length);
         document.getElementById("s-wknd").textContent = String(
-          data.weekend_points || 0
+          data.after_hours_points != null
+            ? data.after_hours_points
+            : data.weekend_points || 0
         );
+        const opensEl = document.getElementById("s-opens");
+        if (opensEl) opensEl.textContent = String(eurusdOpens.length);
 
         resizeAll();
         priceChart.timeScale().fitContent();
         otcChart.timeScale().fitContent();
         euChart.timeScale().fitContent();
         spreadChart.timeScale().fitContent();
+        requestAnimationFrame(() => drawEurusdOpenLines());
       }
 
       function renderStatus(st) {
