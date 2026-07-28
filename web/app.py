@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
-from bot.ohlc_spread import build_spread_1h
+from bot.ohlc_spread import build_spread_1h, detect_eurusd_opens
 from bot.ohlc_store import (
     candles_to_csv,
     fetch_candles,
@@ -409,7 +409,7 @@ def ohlc_spread_series(
     limit: int = 0,
     _: None = Depends(require_token),
 ) -> dict:
-    """Candles OTC + EURUSD + serie de spread (carry no fim de semana)."""
+    """Candles OTC + EURUSD + serie de spread (carry apos fechamento EURUSD)."""
     otc_a = normalize_asset(
         otc_asset
         or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
@@ -429,7 +429,9 @@ def ohlc_spread_series(
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     spread = build_spread_1h(otc_rows, eu_rows)
+    opens = detect_eurusd_opens(eu_rows)
     weekend_n = sum(1 for p in spread if p.get("weekend"))
+    after_hours_n = sum(1 for p in spread if p.get("after_hours"))
     return {
         "timeframe": "1h",
         "otc_asset": otc_a,
@@ -438,6 +440,8 @@ def ohlc_spread_series(
         "eurusd_count": len(eu_rows),
         "spread_count": len(spread),
         "weekend_points": weekend_n,
+        "after_hours_points": after_hours_n,
+        "eurusd_opens": opens,
         "otc": otc_rows,
         "eurusd": eu_rows,
         "spread": spread,
