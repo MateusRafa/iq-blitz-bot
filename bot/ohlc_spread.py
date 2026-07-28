@@ -8,7 +8,7 @@ e compara com cada vela OTC (modo carry).
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -46,36 +46,29 @@ def detect_eurusd_opens(
     eurusd_rows: list[dict[str, Any]],
     *,
     gap_hours: float | None = None,
+    pocket_offset: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Marca aberturas do EURUSD: 1a vela apos buraco >= gap_hours.
-
-    gap padrao: OHLC_SPREAD_OPEN_GAP_HOURS (default 2h) — cobre fechamento
-    diario e fim de semana.
-    """
-    gap_h = (
-        _env_float("OHLC_SPREAD_OPEN_GAP_HOURS", 2.0)
-        if gap_hours is None
-        else float(gap_hours)
+    """Marca cada abertura diaria do EURUSD (1a vela do dia civil Pocket)."""
+    _ = gap_hours  # legado
+    off = (
+        int(_env_float("POCKET_TIME_OFFSET", -10800))
+        if pocket_offset is None
+        else int(pocket_offset)
     )
-    gap_sec = max(gap_h, 1.0) * 3600.0
-    times: list[datetime] = []
+    by_day: dict[str, datetime] = {}
     for r in eurusd_rows:
         ts = _parse_ts(r.get("opened_at"))
-        if ts is not None:
-            times.append(ts.replace(minute=0, second=0, microsecond=0))
-    times = sorted(set(times))
-    opens: list[dict[str, Any]] = []
-    prev: datetime | None = None
-    for ts in times:
-        if prev is None or (ts - prev).total_seconds() >= gap_sec:
-            opens.append(
-                {
-                    "time": int(ts.timestamp()),
-                    "opened_at": ts.isoformat(),
-                }
-            )
-        prev = ts
-    return opens
+        if ts is None:
+            continue
+        ts = ts.replace(minute=0, second=0, microsecond=0)
+        day = (ts + timedelta(seconds=off)).date().isoformat()
+        prev = by_day.get(day)
+        if prev is None or ts < prev:
+            by_day[day] = ts
+    return [
+        {"time": int(ts.timestamp()), "opened_at": ts.isoformat(), "day": day}
+        for day, ts in sorted(by_day.items(), key=lambda kv: kv[1])
+    ]
 
 
 def build_spread_1h(
