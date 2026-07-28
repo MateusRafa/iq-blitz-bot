@@ -12,9 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bot.ohlc_collector import collector
-from bot.ohlc_collector_1d import collector_1d
+from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_store import (
-    TABLE_1D,
     candles_to_csv,
     fetch_candles,
     fetch_candles_range,
