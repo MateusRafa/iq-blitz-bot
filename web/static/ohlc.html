@@ -230,6 +230,7 @@
               <button type="button" class="btn btn-mode active" data-mode="ohlc">Candles</button>
               <button type="button" class="btn btn-mode" data-mode="signed">Força vs 0</button>
               <button type="button" class="btn btn-mode" data-mode="cum">Tipo acum.</button>
+              <button type="button" class="btn btn-mode" data-mode="bodycum">Corpo acum.</button>
               <button type="button" class="btn btn-mode" data-mode="streak">Cruzamento</button>
               <button type="button" class="btn btn-mode" data-mode="pnf">Pontos (P)</button>
             </div>
@@ -334,7 +335,7 @@
       const PROB_ON_KEY = "iq_blitz_ohlc_prob_on";
       const PROB_LINK_KEY = "iq_blitz_ohlc_prob_link";
       const PROB_LINES_KEY = "iq_blitz_ohlc_prob_lines";
-      const CHART_MODES = ["ohlc", "signed", "cum", "streak", "pnf"];
+      const CHART_MODES = ["ohlc", "signed", "cum", "bodycum", "streak", "pnf"];
       const PROB_HORIZONS = [
         { key: "1h", bars: 1, color: "#22d3ee" },
         { key: "4h", bars: 4, color: "#a78bfa" },
@@ -666,6 +667,25 @@
             time: c.time,
             position: "inBar",
             color: score > 0 ? "#22d3ee" : score < 0 ? "#f43f5e" : "#94a3b8",
+            shape: "circle",
+            size: 2,
+          });
+        }
+        return { points, markers };
+      }
+
+      /** Corpo acum.: Σ(close − open), sem pavios, em preço cru. */
+      function buildBodyCumData(candles) {
+        let sum = 0;
+        const points = [];
+        const markers = [];
+        for (const c of candles) {
+          sum += c.close - c.open;
+          points.push({ time: c.time, value: sum });
+          markers.push({
+            time: c.time,
+            position: "inBar",
+            color: sum > 0 ? "#22d3ee" : sum < 0 ? "#f43f5e" : "#94a3b8",
             shape: "circle",
             size: 2,
           });
@@ -1098,11 +1118,15 @@
         );
       }
 
-      function applyLineMode(builder) {
+      function applyLineMode(builder, priceFormat) {
         activeSeries = chart.addLineSeries({
           color: "#94a3b8",
           lineWidth: 2,
-          priceFormat: { type: "price", precision: 0, minMove: 1 },
+          priceFormat: priceFormat || {
+            type: "price",
+            precision: 0,
+            minMove: 1,
+          },
           lastValueVisible: true,
           priceLineVisible: false,
         });
@@ -1177,6 +1201,12 @@
           attachZeroLine(activeSeries);
         } else if (chartMode === "cum") {
           applyLineMode(buildCumData);
+        } else if (chartMode === "bodycum") {
+          applyLineMode(buildBodyCumData, {
+            type: "price",
+            precision: 5,
+            minMove: 0.00001,
+          });
         } else {
           applyLineMode(buildStreakData);
         }
