@@ -44,6 +44,40 @@
         padding: 1rem;
         text-align: center;
       }
+      .countdown-box {
+        margin-top: 0.85rem;
+        padding: 0.85rem 1rem;
+        border-radius: 10px;
+        border: 1px solid rgba(34, 211, 238, 0.35);
+        background: linear-gradient(135deg, #0b1a2e 0%, #0a1220 100%);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      .countdown-box .cd-label {
+        color: #94a3b8;
+        font-size: 0.85rem;
+      }
+      .countdown-box .cd-time {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 2rem;
+        font-weight: 700;
+        color: #22d3ee;
+        letter-spacing: 0.06em;
+        min-width: 5.5rem;
+        text-align: right;
+      }
+      .countdown-box.cd-pulling .cd-time {
+        color: #fbbf24;
+        font-size: 1.25rem;
+        letter-spacing: 0;
+      }
+      .countdown-box.cd-idle .cd-time {
+        color: #64748b;
+        font-size: 1.25rem;
+      }
       .chart-modes {
         display: flex;
         flex-wrap: wrap;
@@ -243,7 +277,7 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Candles <strong>1m</strong>. Primeira puxada igual ao coletor <strong>1h</strong>; depois sync a cada <strong>5 minutos</strong> (só velas fechadas) + retenção <strong>90 dias</strong>.
+              Candles <strong>1m</strong>. Ao <strong>Iniciar</strong>: 1ª puxada + cronômetro de <strong>5 min</strong>; ao zerar, puxa de novo com a mesma lógica de <strong>Puxar agora</strong> (só fechadas, sem duplicar).
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -261,6 +295,15 @@
                 Re-sync 20 min
               </button>
               <button type="button" class="btn" id="btn-export-csv">Export CSV</button>
+            </div>
+            <div id="countdown-box" class="countdown-box cd-idle" aria-live="polite">
+              <div>
+                <div class="cd-label" id="cd-label">Cronômetro 5 min</div>
+                <div class="message" style="margin:0.25rem 0 0;font-size:0.8rem" id="cd-hint">
+                  Inicie o coletor para começar a contagem.
+                </div>
+              </div>
+              <div class="cd-time" id="cd-time">05:00</div>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
             <div id="retention-banner" class="retention-banner" role="status"></div>
@@ -1558,6 +1601,55 @@
         return String(v).replace("T", " ").slice(0, 19) + " UTC";
       }
 
+      let nextFetchAtMs = null;
+      let lastCountdownPhase = "";
+
+      function fmtCountdown(sec) {
+        const s = Math.max(0, Math.floor(sec));
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
+      }
+
+      function tickCountdown() {
+        const box = document.getElementById("countdown-box");
+        const timeEl = document.getElementById("cd-time");
+        const labelEl = document.getElementById("cd-label");
+        const hintEl = document.getElementById("cd-hint");
+        if (!box || !timeEl) return;
+
+        const phase = lastCountdownPhase || "";
+        const pulling = ["fetch", "manual_pull", "backfill", "connect", "reconnect"].includes(phase);
+
+        if (pulling) {
+          box.className = "countdown-box cd-pulling";
+          labelEl.textContent = "Puxando dados…";
+          hintEl.textContent = "Mesma lógica do botão Puxar agora (velas fechadas).";
+          timeEl.textContent = "…";
+          return;
+        }
+
+        if (!nextFetchAtMs) {
+          box.className = "countdown-box cd-idle";
+          labelEl.textContent = "Cronômetro 5 min";
+          hintEl.textContent = "Inicie o coletor para começar a contagem.";
+          timeEl.textContent = "05:00";
+          return;
+        }
+
+        const left = (nextFetchAtMs - Date.now()) / 1000;
+        box.className = "countdown-box";
+        labelEl.textContent = "Próxima puxada automática";
+        if (left <= 0) {
+          timeEl.textContent = "00:00";
+          hintEl.textContent = "Zerou — aguardando puxada no servidor…";
+          return;
+        }
+        timeEl.textContent = fmtCountdown(left);
+        hintEl.textContent =
+          "Ao zerar, puxa com a mesma lógica de Puxar agora.";
+      }
+
       function render(st) {
         const running = !!st.running;
         badge.textContent = running ? "COLETANDO" : "STAND-BY";
@@ -1592,6 +1684,14 @@
           ? String(st.updated_at).replace("T", " ").slice(0, 19)
           : "—";
         document.getElementById("s-msg").textContent = st.message || st.error || "";
+        lastCountdownPhase = st.phase || "";
+        if (st.next_fetch_at) {
+          const ms = Date.parse(st.next_fetch_at);
+          nextFetchAtMs = Number.isNaN(ms) ? null : ms;
+        } else if (!running) {
+          nextFetchAtMs = null;
+        }
+        tickCountdown();
         updateRetentionUI(st);
       }
 
@@ -1818,6 +1918,11 @@
         if (appBox.hidden) return;
         refresh().catch(() => {});
       }, 4000);
+
+      setInterval(() => {
+        if (appBox.hidden) return;
+        tickCountdown();
+      }, 250);
 
       document.getElementById("btn-dl-atrisk").addEventListener("click", async () => {
         try {
