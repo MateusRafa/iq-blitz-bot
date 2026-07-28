@@ -123,6 +123,9 @@ def normalize_candle(
         ts = (ts // 60) * 60
     elif timeframe == "1h":
         ts = (ts // 3600) * 3600
+    elif timeframe == "1d":
+        # D1 nativo: timestamp da API ja e a abertura do dia (fuso Pocket).
+        pass
     vol = _f(raw, "volume", "Volume", "v")
     opened = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     row: dict[str, Any] = {
