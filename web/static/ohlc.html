@@ -1281,7 +1281,7 @@
           const q = new URLSearchParams({
             asset: asset || "",
             timeframe: "1h",
-            limit: "300",
+            limit: "0",
           });
           const data = await api("/api/ohlc/candles?" + q.toString());
           const rows = data.candles || [];
