@@ -308,6 +308,33 @@ def last_opened_at(
     return _parse_opened_at(data[0].get("opened_at"))
 
 
+def delete_candles_by_source(
+    asset: str,
+    *,
+    timeframe: str = "1h",
+    source: str,
+    table: str = TABLE,
+    since: datetime | None = None,
+) -> int:
+    """Apaga velas de um source (ex.: limpar Pocket residual na tabela EURUSD)."""
+    ok, msg = supabase_ok()
+    if not ok:
+        raise RuntimeError(msg)
+    sb = cliente_supabase()
+    assert sb is not None
+    q = (
+        sb.table(table)
+        .delete()
+        .eq("asset", asset)
+        .eq("timeframe", timeframe)
+        .eq("source", source)
+    )
+    if since is not None:
+        q = q.gte("opened_at", since.isoformat())
+    res = q.execute()
+    data = getattr(res, "data", None) or []
+    return len(data)
+
 def oldest_opened_at(
     asset: str, timeframe: str = "1h", *, table: str = TABLE
 ) -> datetime | None:
@@ -354,7 +381,7 @@ def fetch_candles(
     lim = max(1, min(int(limit), 5000))
     res = (
         sb.table(table)
-        .select("opened_at,open,high,low,close,volume")
+        .select("opened_at,open,high,low,close,volume,source")
         .eq("asset", asset)
         .eq("timeframe", timeframe)
         .order("opened_at", desc=True)
@@ -494,7 +521,7 @@ def fetch_candles_range(
     while len(out) < max_rows:
         q = (
             sb.table(table)
-            .select("opened_at,open,high,low,close,volume,timeframe,asset")
+            .select("opened_at,open,high,low,close,volume,timeframe,asset,source")
             .eq("asset", asset)
             .eq("timeframe", timeframe)
             .order("opened_at", desc=False)
@@ -528,6 +555,7 @@ def candles_to_csv(rows: list[dict[str, Any]]) -> str:
             "low",
             "close",
             "volume",
+            "source",
         ],
         extrasaction="ignore",
     )
