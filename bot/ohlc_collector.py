@@ -259,6 +259,41 @@ class OhlcCollector:
             self._thread = None
         return self.status()
 
+    def pull_now(self, asset: str | None = None) -> dict[str, Any]:
+        """Puxada manual 1h (backfill incremental) → ohlc_candles."""
+        ok, msg = supabase_ok()
+        if not ok:
+            raise RuntimeError(msg)
+        client: PocketOption | None = None
+        upserted = 0
+        target = normalize_asset(asset) if asset else self._asset
+        try:
+            self._set(
+                phase="manual_pull",
+                message=f"Puxada manual 1h ({target})…",
+                error=None,
+                next_fetch_at=None,
+            )
+            client = self._connect()
+            upserted = self._upsert_tf(client, target, "1h", backfill=True)
+            was_running = self.is_running()
+            self._set(
+                phase="waiting" if was_running else "idle",
+                message=f"Puxada manual ok: {upserted} velas ({target})",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._set(
+                phase="error" if not self.is_running() else "waiting",
+                error=str(exc),
+                message=f"Puxada manual falhou: {exc}",
+            )
+            raise
+        finally:
+            self._close_client(client)
+        st = self.status()
+        st["pull"] = {"upserted": upserted, "asset": target}
+        return st
+
     def _set(self, **kwargs: Any) -> None:
         with self._lock:
             self._snap.update(kwargs)
