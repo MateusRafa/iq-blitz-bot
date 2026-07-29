@@ -169,8 +169,8 @@
               <button type="button" class="btn btn-mode" id="btn-link">Link off</button>
             </div>
             <div class="legend">
-              <span class="lg-otc">EURUSD_otc</span>
-              <span class="lg-eu">EURUSD</span>
+              <span class="lg-otc">EURUSD_otc (Pocket)</span>
+              <span class="lg-eu">EURUSD (Dukascopy)</span>
             </div>
             <p class="message" id="chart-meta">—</p>
 
@@ -671,7 +671,9 @@
           otc.length +
           " velas · " +
           (data.eurusd_asset || "EURUSD") +
-          " · " +
+          " [" +
+          (data.eurusd_source || "?") +
+          "] · " +
           eu.length +
           " velas · spread " +
           allSpread.length +
@@ -719,7 +721,8 @@
         badge.className = "badge " + (running ? "badge-on" : "badge-off");
         btnStart.disabled = running;
         btnStop.disabled = !running;
-        document.getElementById("s-phase").textContent = eu.phase || "—";
+        document.getElementById("s-phase").textContent =
+          (eu.source ? String(eu.source) + " · " : "") + (eu.phase || "—");
         document.getElementById("s-eu").textContent =
           eu.stored_count != null ? String(eu.stored_count) : "—";
         document.getElementById("s-otc").textContent =
