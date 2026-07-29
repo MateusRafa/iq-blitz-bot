@@ -531,12 +531,22 @@ def ohlc_spread_series(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    # Preferir Dukascopy no grafico; se ainda so houver Pocket (legado), usa tudo.
-    dukas = [r for r in eu_rows if str(r.get("source") or "").lower() == "dukascopy"]
-    pocket_eu = [r for r in eu_rows if str(r.get("source") or "").lower() == "pocket"]
+    # Preferir Dukascopy no grafico; se so houver Pocket (legado), usa Pocket.
+    dukas = [
+        r for r in eu_rows if str(r.get("source") or "").lower() == "dukascopy"
+    ]
+    unknown = [
+        r for r in eu_rows if not str(r.get("source") or "").strip()
+    ]
+    pocket_eu = [
+        r for r in eu_rows if str(r.get("source") or "").lower() == "pocket"
+    ]
     if dukas:
         eu_rows = dukas
         eu_source = "dukascopy"
+    elif unknown and not pocket_eu:
+        eu_rows = unknown
+        eu_source = "legacy"
     elif pocket_eu:
         eu_rows = pocket_eu
         eu_source = "pocket"
