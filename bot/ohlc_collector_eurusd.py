@@ -15,6 +15,7 @@ from bot.dukascopy_fetch import fetch_eurusd_1h_rows_for_store
 from bot.ohlc_collector import seconds_until_next_hourly_fetch
 from bot.ohlc_store import (
     delete_candles_by_source,
+    last_opened_at,
     stored_summary,
     supabase_ok,
     upsert_candles,
@@ -53,7 +54,6 @@ def _default_asset() -> str:
 def _lookback_days(*, backfill: bool) -> int:
     if backfill:
         return max(1, min(_env_int("OHLC_SPREAD_SYNC_DAYS", 14), 90))
-    # Ciclo horario: so puxa poucas horas (incremental).
     return max(1, min(_env_int("OHLC_EURUSD_LIVE_DAYS", 2), 14))
 
 
@@ -62,6 +62,7 @@ class OhlcCollectorEurusd:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._pull_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._asset = _default_asset()
@@ -185,7 +186,12 @@ class OhlcCollectorEurusd:
         ok, msg = supabase_ok()
         if not ok:
             raise RuntimeError(msg)
+        if not self._pull_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "Ja existe uma puxada Dukascopy em andamento. Aguarde."
+            )
         asset = self._asset
+        upserted = 0
         try:
             self._set(
                 phase="manual_pull",
@@ -197,19 +203,37 @@ class OhlcCollectorEurusd:
                 asset,
                 days=days or _lookback_days(backfill=True),
                 purge_pocket=True,
+                prefer_incremental=True,
             )
-            was_running = self.is_running()
-            self._set(
-                phase="waiting" if was_running else "idle",
-                message=f"Puxada Dukascopy ok: {upserted} velas EURUSD",
-            )
+            if upserted <= 0:
+                now = datetime.now(timezone.utc)
+                # Sab/dom: mercado FX pode nao ter bi5 — nao trata como bug duro.
+                if now.weekday() < 5:
+                    raise RuntimeError(
+                        "Dukascopy retornou 0 velas. Datafeed indisponivel "
+                        "ou bloqueado — tente de novo em alguns minutos."
+                    )
+                self._set(
+                    phase="waiting" if self.is_running() else "idle",
+                    message="Dukascopy 0 velas (fim de semana / mercado fechado)",
+                    error=None,
+                )
+            else:
+                was_running = self.is_running()
+                self._set(
+                    phase="waiting" if was_running else "idle",
+                    message=f"Puxada Dukascopy ok: {upserted} velas EURUSD",
+                    error=None,
+                )
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error" if not self.is_running() else "waiting",
-                error=str(exc),
+                error=str(exc)[:300],
                 message=f"Puxada Dukascopy falhou: {exc}",
             )
             raise
+        finally:
+            self._pull_lock.release()
         st = self.status()
         st["pull"] = {
             "upserted": upserted,
@@ -223,19 +247,60 @@ class OhlcCollectorEurusd:
             self._snap.update(kwargs)
             self._snap["updated_at"] = datetime.now(timezone.utc).isoformat()
 
+    def _resolve_window(
+        self,
+        asset: str,
+        *,
+        days: int,
+        prefer_incremental: bool,
+    ) -> tuple[datetime, datetime]:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(1, days))
+        if not prefer_incremental:
+            return start, end
+        try:
+            last = last_opened_at(asset, "1h", table=TABLE_EURUSD)
+        except Exception:  # noqa: BLE001
+            last = None
+        if last is None:
+            return start, end
+        # Overlap 6h para regravar velas recentes/incompletas.
+        candidate = last - timedelta(hours=6)
+        # Nao encolher demais: se o gap for grande, respeita lookback days.
+        if candidate > start:
+            start = candidate
+        return start, end
+
     def _sync_dukascopy(
         self,
         asset: str,
         *,
         days: int,
         purge_pocket: bool,
+        prefer_incremental: bool = True,
     ) -> int:
-        """Baixa janela de N dias da Dukascopy e grava (sobrescreve Pocket)."""
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=max(1, days))
-        # Incremental leve no ciclo live: se ja houver dado dukascopy recente,
-        # ainda assim re-puxamos a janela days (curta) para atualizar a ultima hora.
-        rows = fetch_eurusd_1h_rows_for_store(start, end, asset=asset)
+        """Baixa janela Dukascopy e grava (sobrescreve Pocket na janela)."""
+        start, end = self._resolve_window(
+            asset, days=days, prefer_incremental=prefer_incremental
+        )
+        # Fatias de no max ~3 dias para nao estourar timeout HTTP do Railway.
+        chunk_hours = max(12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 72), 168))
+        rows: list[dict[str, Any]] = []
+        cursor = start
+        while cursor < end:
+            piece_end = min(cursor + timedelta(hours=chunk_hours), end)
+            part = fetch_eurusd_1h_rows_for_store(
+                cursor, piece_end, asset=asset
+            )
+            rows.extend(part)
+            cursor = piece_end
+
+        # Dedup por opened_at (chunks podem se tocar).
+        by_t: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            by_t[str(row["opened_at"])] = row
+        rows = sorted(by_t.values(), key=lambda r: str(r["opened_at"]))
+
         n = upsert_candles(rows, table=TABLE_EURUSD) if rows else 0
         removed = 0
         if purge_pocket:
@@ -248,7 +313,6 @@ class OhlcCollectorEurusd:
                     since=start,
                 )
             except Exception as exc:  # noqa: BLE001
-                # Tabela pode nao ter filtro source em schemas antigos; nao bloqueia.
                 self._set(message=f"Upsert Dukascopy {n}; purge pocket: {exc}")
         with self._lock:
             prev = int(self._snap["per_tf"].get("1h", {}).get("ok", 0) or 0)
@@ -258,6 +322,8 @@ class OhlcCollectorEurusd:
                 self._snap.get("total_upserted", 0) or 0
             ) + n
             self._snap["source"] = SOURCE
+            self._snap["last_sync_from"] = start.isoformat()
+            self._snap["last_sync_to"] = end.isoformat()
             if removed:
                 self._snap["message"] = (
                     f"Dukascopy +{n} velas; removidas {removed} Pocket na janela"
@@ -275,7 +341,8 @@ class OhlcCollectorEurusd:
 
     def _wait_for_next_cycle(self) -> None:
         align = _env_flag_default_on("OHLC_EURUSD_ALIGN_HOUR", "1")
-        after = _env_int("OHLC_EURUSD_AFTER_HOUR_SECONDS", 120)
+        # Apos virar a hora, espera um pouco para o bi5 da Dukascopy existir.
+        after = _env_int("OHLC_EURUSD_AFTER_HOUR_SECONDS", 180)
         if align:
             wait = seconds_until_next_hourly_fetch(after_hour_seconds=after)
             mode = "hourly"
@@ -309,15 +376,29 @@ class OhlcCollectorEurusd:
                 ),
             )
             try:
-                n = self._sync_dukascopy(asset, days=days, purge_pocket=True)
-                self._set(message=f"Sync Dukascopy 1h: {n} velas")
+                if not self._pull_lock.acquire(blocking=False):
+                    self._set(message="Backfill adiado: puxada manual em curso")
+                else:
+                    try:
+                        n = self._sync_dukascopy(
+                            asset,
+                            days=days,
+                            purge_pocket=True,
+                            prefer_incremental=stored > 0,
+                        )
+                        self._set(message=f"Sync Dukascopy 1h: {n} velas")
+                    finally:
+                        self._pull_lock.release()
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._snap["per_tf"]["1h"] = {
                         "ok": 0,
                         "err": str(exc)[:200],
                     }
-                self._set(message=f"Sync Dukascopy falhou: {exc}")
+                self._set(
+                    message=f"Sync Dukascopy falhou: {exc}",
+                    error=str(exc)[:300],
+                )
 
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
@@ -330,10 +411,22 @@ class OhlcCollectorEurusd:
                         message=f"Buscando Dukascopy EURUSD ({live_days}d)…",
                         next_fetch_at=None,
                     )
-                    n = self._sync_dukascopy(
-                        asset, days=live_days, purge_pocket=True
-                    )
-                    self._set(message=f"Fetch Dukascopy: {n} velas")
+                    if not self._pull_lock.acquire(blocking=False):
+                        self._set(message="Fetch pulado: puxada manual em curso")
+                        continue
+                    try:
+                        n = self._sync_dukascopy(
+                            asset,
+                            days=live_days,
+                            purge_pocket=True,
+                            prefer_incremental=True,
+                        )
+                        self._set(
+                            message=f"Fetch Dukascopy: {n} velas",
+                            error=None,
+                        )
+                    finally:
+                        self._pull_lock.release()
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
                         cur = self._snap["per_tf"].get("1h", {})
@@ -341,7 +434,10 @@ class OhlcCollectorEurusd:
                             "ok": cur.get("ok", 0),
                             "err": str(exc)[:200],
                         }
-                    self._set(message=f"Fetch Dukascopy falhou: {exc}")
+                    self._set(
+                        message=f"Fetch Dukascopy falhou: {exc}",
+                        error=str(exc)[:300],
+                    )
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error",
