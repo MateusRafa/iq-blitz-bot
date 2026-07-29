@@ -131,17 +131,21 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Coleta o <strong>EURUSD</strong> (mercado) na tabela
-              <code>ohlc_candles_eurusd</code>. O OTC continua no coletor
-              <a href="/ohlc" style="color:#22d3ee">/ohlc</a>
-              (tabela <code>ohlc_candles</code>).
+              <strong>EURUSD_otc</strong> vem da Pocket (tabela
+              <code>ohlc_candles</code> via
+              <a href="/ohlc" style="color:#22d3ee">/ohlc</a>).
+              <strong>EURUSD</strong> (mercado) é puxado da
+              <strong>Dukascopy</strong> (UTC / Bid) para
+              <code>ohlc_candles_eurusd</code>.
+              “Baixar dados” sincroniza as duas fontes e baixa um ZIP com os CSVs.
               Após o fechamento diário (e no fim de semana) o spread usa o
               último close do EURUSD vs cada vela OTC ainda aberta.
             </p>
             <div class="controls">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar coleta</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
-              <button type="button" class="btn btn-apply" id="btn-pull">Puxar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-pull">Sincronizar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-download">Baixar dados</button>
               <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
@@ -332,22 +336,30 @@
         if (typeof LightweightCharts === "undefined") return false;
         if (!priceChart) {
           const el = document.getElementById("price-chart");
+          if (!el) return false;
           priceChart = LightweightCharts.createChart(el, chartOpts(el));
           seriesOtc = candleSeries(priceChart, "#22d3ee", "#0891b2");
           seriesEu = candleSeries(priceChart, "#fbbf24", "#d97706");
         }
-        if (!otcChart) {
-          const el = document.getElementById("otc-chart");
-          otcChart = LightweightCharts.createChart(el, chartOpts(el));
-          seriesOtcSplit = candleSeries(otcChart, "#22d3ee", "#0891b2");
-        }
-        if (!euChart) {
-          const el = document.getElementById("eu-chart");
-          euChart = LightweightCharts.createChart(el, chartOpts(el));
-          seriesEuSplit = candleSeries(euChart, "#fbbf24", "#d97706");
+        if (layout === "split") {
+          if (!otcChart) {
+            const el = document.getElementById("otc-chart");
+            if (el) {
+              otcChart = LightweightCharts.createChart(el, chartOpts(el));
+              seriesOtcSplit = candleSeries(otcChart, "#22d3ee", "#0891b2");
+            }
+          }
+          if (!euChart) {
+            const el = document.getElementById("eu-chart");
+            if (el) {
+              euChart = LightweightCharts.createChart(el, chartOpts(el));
+              seriesEuSplit = candleSeries(euChart, "#fbbf24", "#d97706");
+            }
+          }
         }
         if (!spreadChart) {
           const el = document.getElementById("spread-chart");
+          if (!el) return false;
           spreadChart = LightweightCharts.createChart(el, chartOpts(el));
           seriesSpread = spreadChart.addLineSeries({
             color: "#a78bfa",
@@ -373,8 +385,8 @@
             title: "0",
           });
           bindOpenLines();
-          bindChartLink();
         }
+        bindChartLink();
         return true;
       }
 
@@ -482,6 +494,7 @@
       }
 
       function syncLinkButton() {
+        if (!btnLink) return;
         btnLink.classList.toggle("active", linkOn);
         btnLink.textContent = linkOn ? "Link ON" : "Link off";
       }
@@ -496,8 +509,14 @@
         if (openLinesBound || !spreadChart) return;
         openLinesBound = true;
         const redraw = () => drawEurusdOpenLines();
-        spreadChart.timeScale().subscribeVisibleLogicalRangeChange(redraw);
-        spreadChart.timeScale().subscribeVisibleTimeRangeChange(redraw);
+        try {
+          spreadChart.timeScale().subscribeVisibleLogicalRangeChange(redraw);
+        } catch (_) {}
+        try {
+          if (typeof spreadChart.timeScale().subscribeVisibleTimeRangeChange === "function") {
+            spreadChart.timeScale().subscribeVisibleTimeRangeChange(redraw);
+          }
+        } catch (_) {}
         window.addEventListener("resize", redraw);
       }
 
@@ -572,6 +591,13 @@
         layout = mode === "split" ? "split" : "overlay";
         localStorage.setItem(LAYOUT_KEY, layout);
         syncLayoutButtons();
+        // Recria series split se necessario e reaplica dados.
+        if (lastOtcCandles.length || lastEuCandles.length || lastSpreadPoints.length) {
+          ensureCharts();
+          if (seriesOtcSplit) seriesOtcSplit.setData(lastOtcCandles);
+          if (seriesEuSplit) seriesEuSplit.setData(lastEuCandles);
+          resizeAll();
+        }
       }
 
       function applySeries(data) {
@@ -584,8 +610,8 @@
         const eu = toCandle(data.eurusd);
         seriesOtc.setData(otc);
         seriesEu.setData(eu);
-        seriesOtcSplit.setData(otc);
-        seriesEuSplit.setData(eu);
+        if (seriesOtcSplit) seriesOtcSplit.setData(otc);
+        if (seriesEuSplit) seriesEuSplit.setData(eu);
         lastOtcCandles = otc;
         lastEuCandles = eu;
 
@@ -605,17 +631,40 @@
         eurusdOpens = (data.eurusd_opens || []).map((o) => ({
           time: o.time,
         }));
-        const markers = eurusdOpens.map((o) => ({
-          time: o.time,
-          position: "aboveBar",
-          color: "#22d3ee",
-          shape: "arrowDown",
-          text: "Open",
-        }));
+        // Markers so podem existir em timestamps presentes na serie (senao LWC quebra).
+        const spreadTimeSet = new Set(allSpread.map((p) => p.time));
+        const markers = [];
+        for (const o of eurusdOpens) {
+          let t = o.time;
+          if (!spreadTimeSet.has(t)) {
+            // snap para o ponto de spread mais proximo
+            let best = null;
+            let bestDist = Infinity;
+            for (const p of allSpread) {
+              const d = Math.abs(p.time - t);
+              if (d < bestDist) {
+                bestDist = d;
+                best = p.time;
+              }
+            }
+            if (best == null || bestDist > 3600 * 6) continue;
+            t = best;
+          }
+          markers.push({
+            time: t,
+            position: "aboveBar",
+            color: "#22d3ee",
+            shape: "arrowDown",
+            text: "Open",
+          });
+        }
         try {
           seriesSpread.setMarkers(markers);
-        } catch (_) {}
-
+        } catch (_) {
+          try {
+            seriesSpread.setMarkers([]);
+          } catch (__) {}
+        }
         lastMeta =
           (data.otc_asset || "OTC") +
           " · " +
@@ -644,11 +693,22 @@
         if (opensEl) opensEl.textContent = String(eurusdOpens.length);
 
         resizeAll();
-        priceChart.timeScale().fitContent();
-        otcChart.timeScale().fitContent();
-        euChart.timeScale().fitContent();
-        spreadChart.timeScale().fitContent();
-        requestAnimationFrame(() => drawEurusdOpenLines());
+        try {
+          priceChart.timeScale().fitContent();
+        } catch (_) {}
+        try {
+          if (otcChart) otcChart.timeScale().fitContent();
+        } catch (_) {}
+        try {
+          if (euChart) euChart.timeScale().fitContent();
+        } catch (_) {}
+        try {
+          spreadChart.timeScale().fitContent();
+        } catch (_) {}
+        requestAnimationFrame(() => {
+          resizeAll();
+          drawEurusdOpenLines();
+        });
       }
 
       function renderStatus(st) {
@@ -668,7 +728,7 @@
           ? "ligado"
           : "parado";
         document.getElementById("s-msg").textContent =
-          eu.message || eu.error || "";
+          eu.message || eu.error || otc.stored_err || "";
       }
 
       async function loadCharts() {
@@ -679,13 +739,19 @@
       async function refresh() {
         const st = await api("/api/ohlc-spread/status");
         renderStatus(st);
-        await loadCharts();
+        try {
+          await loadCharts();
+        } catch (e) {
+          document.getElementById("chart-meta").textContent =
+            "Erro ao carregar gráficos: " + (e.message || e);
+          setCmdErro(e.message || String(e));
+        }
         return st;
       }
 
       btnOverlay.addEventListener("click", () => setLayout("overlay"));
       btnSplit.addEventListener("click", () => setLayout("split"));
-      btnLink.addEventListener("click", () => setLinkOn(!linkOn));
+      if (btnLink) btnLink.addEventListener("click", () => setLinkOn(!linkOn));
 
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
@@ -723,10 +789,47 @@
 
       document.getElementById("btn-pull").addEventListener("click", async () => {
         try {
-          const st = await api("/api/ohlc-spread/pull-now", "POST");
-          renderStatus(st);
-          await loadCharts();
           setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Sincronizando OTC (Pocket) + EURUSD (Dukascopy)…";
+          const st = await api("/api/ohlc-spread/pull-now", "POST", { days: 14 });
+          renderStatus(st);
+          const sync = st.sync || {};
+          const otcN = (sync.otc || {}).upserted;
+          const euN = (sync.eurusd || {}).upserted;
+          document.getElementById("s-msg").textContent =
+            `Sync ok · OTC +${otcN ?? "?"} · Dukascopy +${euN ?? "?"}`;
+          await loadCharts();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-download").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Baixando: sincroniza Pocket + Dukascopy e gera ZIP…";
+          const res = await fetch("/api/ohlc-spread/export?days=14&sync=1", {
+            headers: { "X-Control-Token": getToken() },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            const detail = data.detail || res.statusText || "Erro no download";
+            throw new Error(
+              typeof detail === "string" ? detail : JSON.stringify(detail)
+            );
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "ohlc_spread_otc_dukascopy.zip";
+          a.click();
+          URL.revokeObjectURL(url);
+          document.getElementById("s-msg").textContent =
+            "Download concluído (ZIP com OTC + EURUSD Dukascopy).";
+          await refresh();
         } catch (e) {
           setCmdErro(e.message || String(e));
         }
@@ -743,9 +846,10 @@
 
       window.addEventListener("resize", resizeAll);
       if (typeof ResizeObserver !== "undefined") {
-        new ResizeObserver(() => resizeAll()).observe(
-          document.getElementById("price-chart").parentElement || document.body
-        );
+        const priceEl = document.getElementById("price-chart");
+        if (priceEl?.parentElement) {
+          new ResizeObserver(() => resizeAll()).observe(priceEl.parentElement);
+        }
       }
 
       (async () => {
@@ -758,6 +862,8 @@
         try {
           showApp();
           syncLayoutButtons();
+          // Espera o painel ganhar largura antes de criar os charts.
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
           await refresh();
         } catch (e) {
           showAuth(e.message || String(e));
