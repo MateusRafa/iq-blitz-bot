@@ -43,10 +43,10 @@ def sync_spread_sources(
     pull_otc: bool = True,
     pull_dukascopy: bool = True,
 ) -> dict[str, Any]:
-    """Puxa EURUSD_otc (Pocket) e EURUSD (Dukascopy) → Supabase.
+    """Puxa EURUSD (Dukascopy) e EURUSD_otc (Pocket) → Supabase.
 
-    days: janela Dukascopy (default OHLC_SPREAD_SYNC_DAYS=14). Sempre
-    rebaixa esses dias (sobrescreve residual Pocket na mesma janela).
+    Dukascopy roda primeiro (grafico EURUSD). Janela padrao incremental
+    a partir do ultimo salvo (colektor); `days` e o teto do lookback.
     """
     otc_a = _otc_asset()
     eu_a = _eurusd_asset()
@@ -64,6 +64,32 @@ def sync_spread_sources(
         },
         "days": lookback,
     }
+
+    if pull_dukascopy:
+        try:
+            if collector_eurusd.status().get("asset") != eu_a:
+                try:
+                    collector_eurusd.set_asset(eu_a)
+                except RuntimeError:
+                    # Coletor rodando: mantem asset atual.
+                    pass
+            pull = collector_eurusd.pull_now(days=lookback)
+            result["eurusd"] = {
+                "ok": True,
+                "upserted": int((pull.get("pull") or {}).get("upserted") or 0),
+                "error": None,
+                "asset": eu_a,
+                "source": "dukascopy",
+                "days": lookback,
+            }
+        except Exception as exc:  # noqa: BLE001
+            result["eurusd"] = {
+                "ok": False,
+                "upserted": 0,
+                "error": str(exc)[:400],
+                "asset": eu_a,
+                "source": "dukascopy",
+            }
 
     if pull_otc:
         try:
@@ -84,33 +110,6 @@ def sync_spread_sources(
                 "source": "pocket",
             }
 
-    if pull_dukascopy:
-        try:
-            # Garante asset no coletor Dukascopy.
-            if collector_eurusd.status().get("asset") != eu_a:
-                try:
-                    collector_eurusd.set_asset(eu_a)
-                except RuntimeError:
-                    pass
-            pull = collector_eurusd.pull_now(days=lookback)
-            result["eurusd"] = {
-                "ok": True,
-                "upserted": int((pull.get("pull") or {}).get("upserted") or 0),
-                "error": None,
-                "asset": eu_a,
-                "source": "dukascopy",
-                "days": lookback,
-            }
-        except Exception as exc:  # noqa: BLE001
-            result["eurusd"] = {
-                "ok": False,
-                "upserted": 0,
-                "error": str(exc)[:300],
-                "asset": eu_a,
-                "source": "dukascopy",
-            }
-
-    # Dukascopy e o requisito principal do grafico EURUSD.
     if pull_dukascopy:
         result["ok"] = bool(result["eurusd"]["ok"])
     else:
