@@ -403,9 +403,9 @@ def ohlc_spread_start(
     body: OhlcStartBody = OhlcStartBody(),
     _: None = Depends(require_token),
 ) -> dict:
-    """Inicia coletor EURUSD (mercado). OTC continua no /ohlc."""
+    """Inicia coletor EURUSD via Dukascopy (1h). OTC continua no /ohlc."""
     try:
-        eu = collector_eurusd.start(body.asset or "EURUSD")
+        collector_eurusd.start(body.asset or "EURUSD")
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ohlc_spread_status(_)
@@ -436,10 +436,9 @@ def ohlc_spread_pull_now(
         "eurusd_upserted": (sync.get("eurusd") or {}).get("upserted"),
         "source_eurusd": "dukascopy",
     }
-    if not sync.get("ok"):
-        otc_err = (sync.get("otc") or {}).get("error")
-        eu_err = (sync.get("eurusd") or {}).get("error")
-        detail = "; ".join(x for x in (otc_err, eu_err) if x) or "Sync falhou"
+    eu = sync.get("eurusd") or {}
+    if not eu.get("ok"):
+        detail = eu.get("error") or "Falha ao sincronizar Dukascopy EURUSD"
         raise HTTPException(status_code=502, detail=detail)
     return st
 
@@ -532,6 +531,17 @@ def ohlc_spread_series(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # Preferir Dukascopy no grafico; se ainda so houver Pocket (legado), usa tudo.
+    dukas = [r for r in eu_rows if str(r.get("source") or "").lower() == "dukascopy"]
+    pocket_eu = [r for r in eu_rows if str(r.get("source") or "").lower() == "pocket"]
+    if dukas:
+        eu_rows = dukas
+        eu_source = "dukascopy"
+    elif pocket_eu:
+        eu_rows = pocket_eu
+        eu_source = "pocket"
+    else:
+        eu_source = "unknown"
     try:
         spread = build_spread_1h(otc_rows, eu_rows)
         opens = detect_eurusd_opens(eu_rows)
@@ -545,6 +555,7 @@ def ohlc_spread_series(
         "timeframe": "1h",
         "otc_asset": otc_a,
         "eurusd_asset": eu_a,
+        "eurusd_source": eu_source,
         "otc_count": len(otc_rows),
         "eurusd_count": len(eu_rows),
         "spread_count": len(spread),
