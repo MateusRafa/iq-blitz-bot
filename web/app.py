@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import os
 import secrets
+import zipfile
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -15,6 +17,7 @@ from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
 from bot.ohlc_spread import build_spread_1h, detect_eurusd_opens
+from bot.ohlc_spread_sync import sync_spread_sources
 from bot.ohlc_store import (
     candles_to_csv,
     fetch_candles,
@@ -46,6 +49,12 @@ class OhlcStartBody(BaseModel):
 
 class OhlcResyncDaysBody(BaseModel):
     days: int = Field(default=30, ge=1, le=365)
+
+
+class OhlcSpreadSyncBody(BaseModel):
+    """Dias de historico Dukascopy (OTC usa backfill Pocket incremental)."""
+
+    days: int = Field(default=14, ge=1, le=90)
 
 
 def _control_token() -> str:
@@ -354,8 +363,27 @@ def ohlc_spread_status(_: None = Depends(require_token)) -> dict:
         or collector.status().get("asset")
         or "EURUSD_otc"
     )
-    eu_st = collector_eurusd.status()
-    otc_sum = stored_summary(otc_asset, "1h")
+    try:
+        eu_st = collector_eurusd.status()
+    except Exception as exc:  # noqa: BLE001
+        eu_st = {
+            "running": collector_eurusd.is_running(),
+            "asset": "EURUSD",
+            "phase": "error",
+            "message": str(exc)[:200],
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+            "supabase_ok": False,
+        }
+    try:
+        otc_sum = stored_summary(otc_asset, "1h")
+    except Exception as exc:  # noqa: BLE001
+        otc_sum = {
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+        }
     return {
         "otc": {
             "asset": otc_asset,
@@ -390,16 +418,90 @@ def ohlc_spread_stop(_: None = Depends(require_token)) -> dict:
 
 
 @app.post("/api/ohlc-spread/pull-now")
-def ohlc_spread_pull_now(_: None = Depends(require_token)) -> dict:
+def ohlc_spread_pull_now(
+    body: OhlcSpreadSyncBody = OhlcSpreadSyncBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa EURUSD_otc (Pocket) + EURUSD (Dukascopy) e grava no Supabase."""
     try:
-        pull = collector_eurusd.pull_now()
+        sync = sync_spread_sources(days=body.days)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     st = ohlc_spread_status(_)
-    st["pull"] = pull.get("pull")
+    st["sync"] = sync
+    st["pull"] = {
+        "otc_upserted": (sync.get("otc") or {}).get("upserted"),
+        "eurusd_upserted": (sync.get("eurusd") or {}).get("upserted"),
+        "source_eurusd": "dukascopy",
+    }
+    if not sync.get("ok"):
+        otc_err = (sync.get("otc") or {}).get("error")
+        eu_err = (sync.get("eurusd") or {}).get("error")
+        detail = "; ".join(x for x in (otc_err, eu_err) if x) or "Sync falhou"
+        raise HTTPException(status_code=502, detail=detail)
     return st
+
+
+@app.get("/api/ohlc-spread/export")
+def ohlc_spread_export(
+    days: int = 14,
+    sync: int = 1,
+    _: None = Depends(require_token),
+) -> Response:
+    """Baixa ZIP com CSVs. Por padrao sincroniza Pocket OTC + Dukascopy antes."""
+    lookback = max(1, min(int(days), 90))
+    sync_info: dict | None = None
+    if sync:
+        try:
+            sync_info = sync_spread_sources(days=lookback)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not sync_info.get("ok"):
+            otc_err = (sync_info.get("otc") or {}).get("error")
+            eu_err = (sync_info.get("eurusd") or {}).get("error")
+            detail = "; ".join(x for x in (otc_err, eu_err) if x) or "Sync falhou"
+            raise HTTPException(status_code=502, detail=detail)
+
+    otc_a = normalize_asset(
+        os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+        or collector.status().get("asset")
+        or "EURUSD_otc"
+    )
+    eu_a = normalize_asset(
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip()
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
+    )
+    try:
+        otc_rows = fetch_candles(otc_a, timeframe="1h", limit=0)
+        eu_rows = fetch_candles(
+            eu_a, timeframe="1h", limit=0, table=TABLE_EURUSD
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"ohlc_1h_{otc_a}.csv", candles_to_csv(otc_rows))
+        zf.writestr(f"ohlc_1h_{eu_a}_dukascopy.csv", candles_to_csv(eu_rows))
+        if sync_info is not None:
+            import json
+
+            zf.writestr(
+                "sync_meta.json",
+                json.dumps(sync_info, ensure_ascii=False, indent=2),
+            )
+    data = buf.getvalue()
+    fname = f"ohlc_spread_{otc_a}_{eu_a}.zip"
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.get("/api/ohlc-spread/series")
@@ -428,8 +530,15 @@ def ohlc_spread_series(
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    spread = build_spread_1h(otc_rows, eu_rows)
-    opens = detect_eurusd_opens(eu_rows)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    try:
+        spread = build_spread_1h(otc_rows, eu_rows)
+        opens = detect_eurusd_opens(eu_rows)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"Falha ao montar spread: {exc}"
+        ) from exc
     weekend_n = sum(1 for p in spread if p.get("weekend"))
     after_hours_n = sum(1 for p in spread if p.get("after_hours"))
     return {
