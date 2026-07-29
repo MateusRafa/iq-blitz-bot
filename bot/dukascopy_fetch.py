@@ -5,6 +5,7 @@ from __future__ import annotations
 import lzma
 import os
 import struct
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,23 +38,46 @@ def _hour_url(symbol: str, hour_utc: datetime) -> str:
     return f"{DATAFEED}/{symbol}/{y}/{m:02d}/{d:02d}/{h:02d}h_ticks.bi5"
 
 
-def _download_bi5(url: str, *, timeout: float = 30.0) -> bytes | None:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; iq-blitz-bot/1.0)",
-            "Accept": "*/*",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code in (404, 204):
-            return None
-        raise RuntimeError(f"Dukascopy HTTP {exc.code}: {url}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Dukascopy rede: {exc.reason}") from exc
+def _download_bi5(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    retries: int = 3,
+) -> bytes | None:
+    last_err: Exception | None = None
+    for attempt in range(max(1, retries)):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; iq-blitz-bot/1.1; "
+                    "+https://railway.app)"
+                ),
+                "Accept": "*/*",
+                "Accept-Encoding": "identity",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+                return data or None
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 204):
+                return None
+            last_err = RuntimeError(f"Dukascopy HTTP {exc.code}: {url}")
+            # 403/429/5xx: tenta de novo
+            if exc.code not in (403, 408, 425, 429, 500, 502, 503, 504):
+                raise last_err from exc
+        except urllib.error.URLError as exc:
+            last_err = RuntimeError(f"Dukascopy rede: {exc.reason}")
+        except TimeoutError as exc:
+            last_err = RuntimeError(f"Dukascopy timeout: {url}")
+            last_err.__cause__ = exc
+        if attempt + 1 < retries:
+            time.sleep(0.4 * (attempt + 1))
+    if last_err is not None:
+        raise last_err
+    return None
 
 
 def _ticks_from_bi5(payload: bytes) -> list[tuple[int, float, float]]:
@@ -103,9 +127,10 @@ def _fetch_one_hour(
     *,
     side: str,
     timeout: float,
+    retries: int,
 ) -> dict[str, Any] | None:
     url = _hour_url(symbol, hour_utc)
-    payload = _download_bi5(url, timeout=timeout)
+    payload = _download_bi5(url, timeout=timeout, retries=retries)
     if payload is None:
         return None
     ticks = _ticks_from_bi5(payload)
@@ -120,8 +145,13 @@ def fetch_eurusd_1h(
     side: str = "bid",
     max_workers: int | None = None,
     timeout: float | None = None,
+    include_current_hour: bool = True,
 ) -> list[dict[str, Any]]:
-    """Baixa e agrega velas 1h Bid (UTC) para o intervalo [start, end)."""
+    """Baixa e agrega velas 1h Bid (UTC) para o intervalo [start, end].
+
+    Por padrao inclui a hora corrente (arquivo bi5 parcial da Dukascopy),
+    para o grafico nao ficar 1h atrasado.
+    """
     sym = (symbol or os.environ.get("DUKASCOPY_SYMBOL", "EURUSD")).strip().upper()
     end_dt = end or datetime.now(timezone.utc)
     if start.tzinfo is None:
@@ -135,38 +165,70 @@ def fetch_eurusd_1h(
 
     start_h = start.replace(minute=0, second=0, microsecond=0)
     end_h = end_dt.replace(minute=0, second=0, microsecond=0)
-    if end_h <= start_h:
+    if include_current_hour:
+        end_exclusive = end_h + timedelta(hours=1)
+    else:
+        end_exclusive = end_h
+    if end_exclusive <= start_h:
         return []
 
     hours: list[datetime] = []
     cur = start_h
-    while cur < end_h:
-        # Mercado FX: sabado quase vazio; domingo abre ~21/22 UTC — ainda assim
-        # tentamos e ignoramos 404.
+    while cur < end_exclusive:
         hours.append(cur)
         cur += timedelta(hours=1)
 
-    workers = max(1, min(max_workers or _env_int("DUKASCOPY_WORKERS", 8), 16))
-    to = float(timeout if timeout is not None else _env_int("DUKASCOPY_TIMEOUT", 30))
+    workers = max(1, min(max_workers or _env_int("DUKASCOPY_WORKERS", 6), 12))
+    to = float(timeout if timeout is not None else _env_int("DUKASCOPY_TIMEOUT", 25))
+    retries = max(1, _env_int("DUKASCOPY_RETRIES", 3))
     offer = "bid" if side.lower() != "ask" else "ask"
 
     rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    empty = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {
-            pool.submit(_fetch_one_hour, sym, h, side=offer, timeout=to): h
+            pool.submit(
+                _fetch_one_hour,
+                sym,
+                h,
+                side=offer,
+                timeout=to,
+                retries=retries,
+            ): h
             for h in hours
         }
         for fut in as_completed(futs):
+            hour = futs[fut]
             try:
                 candle = fut.result()
-            except Exception:
-                # Uma hora falhou: propaga se for rede sistemica? Preferimos
-                # continuar e reportar depois via contagem.
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{hour.isoformat()}: {exc}")
                 continue
             if candle:
                 rows.append(candle)
+            else:
+                empty += 1
 
     rows.sort(key=lambda r: r["opened_at"])
+
+    # Se quase tudo falhou (nao e so fds sem arquivo), propaga erro claro.
+    if hours and not rows and errors:
+        sample = "; ".join(errors[:3])
+        raise RuntimeError(
+            f"Dukascopy sem velas ({len(errors)} erros / {len(hours)} horas). "
+            f"Ex.: {sample}"
+        )
+    if hours and not rows and empty == len(hours):
+        # Mercado fechado o intervalo inteiro (ex.: so sabado) — ok vazio.
+        return []
+    fail_ratio = len(errors) / max(len(hours), 1)
+    if rows and fail_ratio > 0.5 and len(errors) >= 8:
+        sample = "; ".join(errors[:2])
+        raise RuntimeError(
+            f"Dukascopy instavel: {len(errors)}/{len(hours)} horas falharam. "
+            f"Ex.: {sample}"
+        )
     return rows
 
 
