@@ -1,6 +1,6 @@
-"""Coletor OHLC Pocket EURUSD (mercado, sem OTC) → tabela ohlc_candles_eurusd.
+"""Coletor OHLC EURUSD (mercado) via Dukascopy → ohlc_candles_eurusd.
 
-Espelha o coletor 1h (/ohlc), ativo fixo EURUSD. Usado pela ferramenta /ohlc-spread.
+Nao usa Pocket. OTC continua em /ohlc (ohlc_candles).
 """
 
 from __future__ import annotations
@@ -11,25 +11,19 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from BinaryOptionsToolsV2.pocketoption import PocketOption
-
-from bot.ohlc_collector import (
-    BACKFILL_OFFSET,
-    LIVE_OFFSET,
-    TIMEFRAMES,
-    normalize_candle,
-    seconds_until_next_hourly_fetch,
-)
+from bot.dukascopy_fetch import fetch_eurusd_1h_rows_for_store
+from bot.ohlc_collector import seconds_until_next_hourly_fetch
 from bot.ohlc_store import (
-    last_opened_at,
+    delete_candles_by_source,
     stored_summary,
     supabase_ok,
     upsert_candles,
 )
-from bot.runner import is_connection_error, load_ssid, normalize_asset
+from bot.runner import normalize_asset
 
 TABLE_EURUSD = "ohlc_candles_eurusd"
 DEFAULT_ASSET = "EURUSD"
+SOURCE = "dukascopy"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -56,8 +50,15 @@ def _default_asset() -> str:
     )
 
 
+def _lookback_days(*, backfill: bool) -> int:
+    if backfill:
+        return max(1, min(_env_int("OHLC_SPREAD_SYNC_DAYS", 14), 90))
+    # Ciclo horario: so puxa poucas horas (incremental).
+    return max(1, min(_env_int("OHLC_EURUSD_LIVE_DAYS", 2), 14))
+
+
 class OhlcCollectorEurusd:
-    """Thread: Pocket EURUSD 1h → upsert ohlc_candles_eurusd."""
+    """Thread: Dukascopy EURUSD 1h (Bid UTC) → upsert ohlc_candles_eurusd."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -69,6 +70,7 @@ class OhlcCollectorEurusd:
             "asset": self._asset,
             "timeframe": "1h",
             "table": TABLE_EURUSD,
+            "source": SOURCE,
             "supabase_ok": False,
             "supabase_msg": "",
             "phase": "idle",
@@ -79,7 +81,7 @@ class OhlcCollectorEurusd:
             "per_tf": {"1h": {"ok": 0, "err": None}},
             "error": None,
             "updated_at": None,
-            "message": "Stand-by",
+            "message": "Stand-by (Dukascopy)",
             "stored_count": None,
             "stored_last": None,
             "stored_err": None,
@@ -93,9 +95,7 @@ class OhlcCollectorEurusd:
         self._snap["supabase_msg"] = msg
 
     def _refresh_stored(self) -> None:
-        summary = stored_summary(
-            self._asset, "1h", table=TABLE_EURUSD
-        )
+        summary = stored_summary(self._asset, "1h", table=TABLE_EURUSD)
         self._snap["stored_count"] = summary.get("stored_count")
         self._snap["stored_last"] = summary.get("stored_last")
         self._snap["stored_err"] = summary.get("stored_err")
@@ -111,6 +111,7 @@ class OhlcCollectorEurusd:
             out = dict(self._snap)
             out["running"] = self.is_running()
             out["asset"] = self._asset
+            out["source"] = SOURCE
             return out
 
     def set_asset(self, asset: str) -> dict[str, Any]:
@@ -126,7 +127,7 @@ class OhlcCollectorEurusd:
                 raise RuntimeError("Pare o coletor antes de trocar o ativo.")
             self._asset = a
             self._snap["asset"] = a
-            self._snap["message"] = f"Ativo definido: {a}"
+            self._snap["message"] = f"Ativo definido: {a} (Dukascopy)"
             self._refresh_stored()
         return self.status()
 
@@ -149,16 +150,17 @@ class OhlcCollectorEurusd:
                 {
                     "running": True,
                     "asset": self._asset,
+                    "source": SOURCE,
                     "phase": "starting",
                     "error": None,
-                    "message": "Iniciando coletor EURUSD…",
+                    "message": "Iniciando coletor Dukascopy EURUSD…",
                     "total_upserted": 0,
                     "per_tf": {"1h": {"ok": 0, "err": None}},
                 }
             )
             self._thread = threading.Thread(
                 target=self._run,
-                name="ohlc-collector-eurusd",
+                name="ohlc-collector-eurusd-dukascopy",
                 daemon=True,
             )
             self._thread.start()
@@ -179,38 +181,41 @@ class OhlcCollectorEurusd:
             self._thread = None
         return self.status()
 
-    def pull_now(self) -> dict[str, Any]:
+    def pull_now(self, *, days: int | None = None) -> dict[str, Any]:
         ok, msg = supabase_ok()
         if not ok:
             raise RuntimeError(msg)
-        client: PocketOption | None = None
-        upserted = 0
         asset = self._asset
         try:
             self._set(
                 phase="manual_pull",
-                message="Puxada manual EURUSD 1h…",
+                message="Puxada Dukascopy EURUSD 1h…",
                 error=None,
                 next_fetch_at=None,
             )
-            client = self._connect()
-            upserted = self._upsert_tf(client, asset, "1h", backfill=True)
+            upserted = self._sync_dukascopy(
+                asset,
+                days=days or _lookback_days(backfill=True),
+                purge_pocket=True,
+            )
             was_running = self.is_running()
             self._set(
                 phase="waiting" if was_running else "idle",
-                message=f"Puxada manual ok: {upserted} velas EURUSD",
+                message=f"Puxada Dukascopy ok: {upserted} velas EURUSD",
             )
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error" if not self.is_running() else "waiting",
                 error=str(exc),
-                message=f"Puxada manual falhou: {exc}",
+                message=f"Puxada Dukascopy falhou: {exc}",
             )
             raise
-        finally:
-            self._close_client(client)
         st = self.status()
-        st["pull"] = {"upserted": upserted, "asset": asset}
+        st["pull"] = {
+            "upserted": upserted,
+            "asset": asset,
+            "source": SOURCE,
+        }
         return st
 
     def _set(self, **kwargs: Any) -> None:
@@ -218,97 +223,47 @@ class OhlcCollectorEurusd:
             self._snap.update(kwargs)
             self._snap["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    def _offset_for_tf(self, asset: str, tf: str, *, backfill: bool) -> int:
-        period = TIMEFRAMES[tf]
-        default = BACKFILL_OFFSET[tf] if backfill else LIVE_OFFSET[tf]
-        try:
-            last = last_opened_at(asset, tf, table=TABLE_EURUSD)
-        except Exception:  # noqa: BLE001
-            return default
-        if last is None:
-            return default
-        now = datetime.now(timezone.utc)
-        gap = int((now - last).total_seconds()) + period * 3
-        if backfill:
-            return max(gap, period * 3)
-        return max(min(gap, default), period * 2)
-
-    def _fetch_tf(
-        self, client: PocketOption, asset: str, tf: str, offset: int
-    ) -> list[dict[str, Any]]:
-        period = TIMEFRAMES[tf]
-        raw = client.get_candles(asset, period, int(offset))
-        if not isinstance(raw, list):
-            raise RuntimeError(f"Resposta inesperada get_candles ({tf})")
-        rows: list[dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            norm = normalize_candle(item, asset=asset, timeframe=tf)
-            if norm:
-                rows.append(norm)
-        return rows
-
-    def _upsert_tf(
+    def _sync_dukascopy(
         self,
-        client: PocketOption,
         asset: str,
-        tf: str,
         *,
-        backfill: bool = False,
+        days: int,
+        purge_pocket: bool,
     ) -> int:
-        offset = self._offset_for_tf(asset, tf, backfill=backfill)
-        rows = self._fetch_tf(client, asset, tf, offset)
-        if not rows:
-            return 0
-        try:
-            last = last_opened_at(asset, tf, table=TABLE_EURUSD)
-        except Exception:  # noqa: BLE001
-            last = None
-        if last is not None:
-            period = TIMEFRAMES[tf]
-            cutoff = last - timedelta(seconds=period)
-            filtered: list[dict[str, Any]] = []
-            for row in rows:
-                try:
-                    ts = datetime.fromisoformat(
-                        str(row["opened_at"]).replace("Z", "+00:00")
-                    )
-                except ValueError:
-                    filtered.append(row)
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts >= cutoff:
-                    filtered.append(row)
-            rows = filtered
-        if not rows:
-            return 0
-        n = upsert_candles(rows, table=TABLE_EURUSD)
+        """Baixa janela de N dias da Dukascopy e grava (sobrescreve Pocket)."""
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(1, days))
+        # Incremental leve no ciclo live: se ja houver dado dukascopy recente,
+        # ainda assim re-puxamos a janela days (curta) para atualizar a ultima hora.
+        rows = fetch_eurusd_1h_rows_for_store(start, end, asset=asset)
+        n = upsert_candles(rows, table=TABLE_EURUSD) if rows else 0
+        removed = 0
+        if purge_pocket:
+            try:
+                removed = delete_candles_by_source(
+                    asset,
+                    timeframe="1h",
+                    source="pocket",
+                    table=TABLE_EURUSD,
+                    since=start,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Tabela pode nao ter filtro source em schemas antigos; nao bloqueia.
+                self._set(message=f"Upsert Dukascopy {n}; purge pocket: {exc}")
         with self._lock:
-            prev = int(self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0)
-            self._snap["per_tf"][tf] = {"ok": prev + n, "err": None}
+            prev = int(self._snap["per_tf"].get("1h", {}).get("ok", 0) or 0)
+            self._snap["per_tf"]["1h"] = {"ok": prev + n, "err": None}
             self._snap["last_upsert"] = n
             self._snap["total_upserted"] = int(
                 self._snap.get("total_upserted", 0) or 0
             ) + n
+            self._snap["source"] = SOURCE
+            if removed:
+                self._snap["message"] = (
+                    f"Dukascopy +{n} velas; removidas {removed} Pocket na janela"
+                )
             self._refresh_stored()
         return n
-
-    def _connect(self) -> PocketOption:
-        ssid = load_ssid()
-        client = PocketOption(ssid)
-        wait = float(os.environ.get("OHLC_CONNECT_WAIT", "5"))
-        time.sleep(max(wait, 2.0))
-        return client
-
-    def _close_client(self, client: PocketOption | None) -> None:
-        if client is None:
-            return
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
 
     def _sleep_interruptible(self, seconds: float) -> None:
         end = time.monotonic() + max(seconds, 0.0)
@@ -333,7 +288,7 @@ class OhlcCollectorEurusd:
             poll_mode=mode,
             next_fetch_at=next_at.isoformat(),
             message=(
-                f"Proximo fetch EURUSD em ~{int(wait // 60)} min "
+                f"Proximo fetch Dukascopy em ~{int(wait // 60)} min "
                 f"({next_at.strftime('%H:%M:%S')} UTC)"
             ),
         )
@@ -341,75 +296,52 @@ class OhlcCollectorEurusd:
 
     def _run(self) -> None:
         asset = self._asset
-        client: PocketOption | None = None
         try:
-            self._set(phase="connect", message=f"Conectando Pocket ({asset})…")
-            client = self._connect()
             self._refresh_stored()
             stored = int(self._snap.get("stored_count") or 0)
+            days = _lookback_days(backfill=True)
             self._set(
                 phase="backfill",
                 message=(
-                    f"Sync EURUSD incremental ({stored} velas)…"
+                    f"Sync Dukascopy {days}d ({stored} velas salvas)…"
                     if stored > 0
-                    else "Backfill EURUSD (base vazia)…"
+                    else f"Backfill Dukascopy {days}d (base vazia)…"
                 ),
             )
             try:
-                n = self._upsert_tf(client, asset, "1h", backfill=True)
-                self._set(message=f"Sync EURUSD 1h: {n} velas")
+                n = self._sync_dukascopy(asset, days=days, purge_pocket=True)
+                self._set(message=f"Sync Dukascopy 1h: {n} velas")
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._snap["per_tf"]["1h"] = {
                         "ok": 0,
                         "err": str(exc)[:200],
                     }
-                self._set(message=f"Sync EURUSD falhou: {exc}")
-
-            self._close_client(client)
-            client = None
+                self._set(message=f"Sync Dukascopy falhou: {exc}")
 
             while not self._stop.is_set():
                 self._wait_for_next_cycle()
                 if self._stop.is_set():
                     break
                 try:
+                    live_days = _lookback_days(backfill=False)
                     self._set(
                         phase="fetch",
-                        message=f"Buscando EURUSD 1h ({asset})…",
+                        message=f"Buscando Dukascopy EURUSD ({live_days}d)…",
                         next_fetch_at=None,
                     )
-                    client = self._connect()
-                    try:
-                        n = self._upsert_tf(
-                            client, asset, "1h", backfill=False
-                        )
-                        self._set(message=f"Fetch EURUSD: {n} velas")
-                    except Exception as exc:  # noqa: BLE001
-                        with self._lock:
-                            cur = self._snap["per_tf"].get("1h", {})
-                            self._snap["per_tf"]["1h"] = {
-                                "ok": cur.get("ok", 0),
-                                "err": str(exc)[:200],
-                            }
-                        if is_connection_error(exc):
-                            self._set(
-                                phase="reconnect",
-                                message=f"Reconectando… ({exc})",
-                            )
-                            self._close_client(client)
-                            time.sleep(3.0)
-                            client = self._connect()
-                            self._upsert_tf(
-                                client, asset, "1h", backfill=False
-                            )
-                        else:
-                            self._set(message=f"Fetch EURUSD falhou: {exc}")
+                    n = self._sync_dukascopy(
+                        asset, days=live_days, purge_pocket=True
+                    )
+                    self._set(message=f"Fetch Dukascopy: {n} velas")
                 except Exception as exc:  # noqa: BLE001
-                    self._set(message=f"Ciclo falhou: {exc}")
-                finally:
-                    self._close_client(client)
-                    client = None
+                    with self._lock:
+                        cur = self._snap["per_tf"].get("1h", {})
+                        self._snap["per_tf"]["1h"] = {
+                            "ok": cur.get("ok", 0),
+                            "err": str(exc)[:200],
+                        }
+                    self._set(message=f"Fetch Dukascopy falhou: {exc}")
         except Exception as exc:  # noqa: BLE001
             self._set(
                 phase="error",
@@ -418,7 +350,6 @@ class OhlcCollectorEurusd:
                 running=False,
             )
         finally:
-            self._close_client(client)
             with self._lock:
                 self._refresh_stored()
                 if not self._stop.is_set() and self._snap.get("phase") != "error":
