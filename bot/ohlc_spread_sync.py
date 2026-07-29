@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from bot.dukascopy_fetch import fetch_eurusd_1h_rows_for_store
 from bot.ohlc_collector import collector
-from bot.ohlc_store import (
-    TABLE,
-    TABLE_EURUSD,
-    last_opened_at,
-    upsert_candles,
-)
+from bot.ohlc_collector_eurusd import collector_eurusd
+from bot.ohlc_store import TABLE, TABLE_EURUSD
 from bot.runner import normalize_asset
 
 
@@ -37,7 +31,9 @@ def _otc_asset() -> str:
 
 def _eurusd_asset() -> str:
     return normalize_asset(
-        os.environ.get("OHLC_EURUSD_ASSET", "").strip() or "EURUSD"
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip()
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
     )
 
 
@@ -49,9 +45,8 @@ def sync_spread_sources(
 ) -> dict[str, Any]:
     """Puxa EURUSD_otc (Pocket) e EURUSD (Dukascopy) → Supabase.
 
-    days: quantos dias de historico Dukascopy pedir (default env
-    OHLC_SPREAD_SYNC_DAYS ou 14). Se ja houver velas, faz incremental
-    a partir do ultimo opened_at (com 2h de overlap).
+    days: janela Dukascopy (default OHLC_SPREAD_SYNC_DAYS=14). Sempre
+    rebaixa esses dias (sobrescreve residual Pocket na mesma janela).
     """
     otc_a = _otc_asset()
     eu_a = _eurusd_asset()
@@ -61,7 +56,12 @@ def sync_spread_sources(
         "otc_asset": otc_a,
         "eurusd_asset": eu_a,
         "otc": {"ok": False, "upserted": 0, "error": None},
-        "eurusd": {"ok": False, "upserted": 0, "error": None, "source": "dukascopy"},
+        "eurusd": {
+            "ok": False,
+            "upserted": 0,
+            "error": None,
+            "source": "dukascopy",
+        },
         "days": lookback,
     }
 
@@ -73,6 +73,7 @@ def sync_spread_sources(
                 "upserted": int((pull.get("pull") or {}).get("upserted") or 0),
                 "error": None,
                 "asset": otc_a,
+                "source": "pocket",
             }
         except Exception as exc:  # noqa: BLE001
             result["otc"] = {
@@ -80,32 +81,25 @@ def sync_spread_sources(
                 "upserted": 0,
                 "error": str(exc)[:300],
                 "asset": otc_a,
+                "source": "pocket",
             }
 
     if pull_dukascopy:
         try:
-            end = datetime.now(timezone.utc)
-            start = end - timedelta(days=lookback)
-            try:
-                last = last_opened_at(eu_a, "1h", table=TABLE_EURUSD)
-            except Exception:  # noqa: BLE001
-                last = None
-            if last is not None:
-                # Overlap de 2h para regravar a ultima vela incompleta.
-                candidate = last - timedelta(hours=2)
-                if candidate > start:
-                    start = candidate
-            rows = fetch_eurusd_1h_rows_for_store(start, end, asset=eu_a)
-            n = upsert_candles(rows, table=TABLE_EURUSD) if rows else 0
+            # Garante asset no coletor Dukascopy.
+            if collector_eurusd.status().get("asset") != eu_a:
+                try:
+                    collector_eurusd.set_asset(eu_a)
+                except RuntimeError:
+                    pass
+            pull = collector_eurusd.pull_now(days=lookback)
             result["eurusd"] = {
                 "ok": True,
-                "upserted": n,
-                "fetched": len(rows),
+                "upserted": int((pull.get("pull") or {}).get("upserted") or 0),
                 "error": None,
                 "asset": eu_a,
                 "source": "dukascopy",
-                "from": start.isoformat(),
-                "to": end.isoformat(),
+                "days": lookback,
             }
         except Exception as exc:  # noqa: BLE001
             result["eurusd"] = {
@@ -116,7 +110,11 @@ def sync_spread_sources(
                 "source": "dukascopy",
             }
 
-    result["ok"] = bool(result["otc"]["ok"] or result["eurusd"]["ok"])
+    # Dukascopy e o requisito principal do grafico EURUSD.
+    if pull_dukascopy:
+        result["ok"] = bool(result["eurusd"]["ok"])
+    else:
+        result["ok"] = bool(result["otc"]["ok"])
     result["table_otc"] = TABLE
     result["table_eurusd"] = TABLE_EURUSD
     return result
