@@ -64,6 +64,14 @@ class OhlcSpreadOtcHistoryBody(BaseModel):
     asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class OhlcSpreadDukaHistoryBody(BaseModel):
+    """Backfill profundo Dukascopy (casa com OTC ou N dias)."""
+
+    days: int = Field(default=600, ge=7, le=800)
+    match_otc: bool = True
+    otc_asset: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 def _control_token() -> str:
     return os.environ.get("CONTROL_TOKEN", "").strip()
 
@@ -490,6 +498,27 @@ def ohlc_spread_backfill_otc(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     st = ohlc_spread_status(_)
     st["backfill_otc"] = pull.get("pull")
+    return st
+
+
+@app.post("/api/ohlc-spread/backfill-dukascopy")
+def ohlc_spread_backfill_dukascopy(
+    body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa historico Dukascopy alinhado ao EURUSD_otc (ou N dias)."""
+    try:
+        pull = collector_eurusd.pull_history(
+            days=body.days,
+            match_otc=body.match_otc,
+            otc_asset=body.otc_asset,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_status(_)
+    st["backfill_dukascopy"] = pull.get("pull")
     return st
 
 
