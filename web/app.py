@@ -58,9 +58,9 @@ class OhlcSpreadSyncBody(BaseModel):
 
 
 class OhlcSpreadOtcHistoryBody(BaseModel):
-    """Backfill profundo OTC Pocket (grava velas antigas, nao so incremental)."""
+    """Backfill profundo OTC Pocket (paginado ate ~2 anos)."""
 
-    days: int = Field(default=45, ge=7, le=120)
+    days: int = Field(default=600, ge=7, le=800)
     asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
