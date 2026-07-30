@@ -197,6 +197,26 @@ def ohlc_stop(_: None = Depends(require_token)) -> dict:
     return collector.stop()
 
 
+@app.post("/api/ohlc/backfill-history")
+def ohlc_backfill_history(
+    body: OhlcSpreadOtcHistoryBody = OhlcSpreadOtcHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa historico profundo do ativo (paginado, inclui 2024 se a Pocket tiver)."""
+    asset = normalize_asset(
+        body.asset or collector.status().get("asset") or "EURUSD_otc"
+    )
+    try:
+        pull = collector.pull_history(asset, days=body.days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = collector.status()
+    st["backfill"] = pull.get("pull")
+    return st
+
+
 @app.get("/api/ohlc/candles")
 def ohlc_candles(
     asset: str | None = None,
