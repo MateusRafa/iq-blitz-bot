@@ -138,8 +138,8 @@
               <strong>Dukascopy</strong> (UTC / Bid) para
               <code>ohlc_candles_eurusd</code>.
               “Baixar dados” sincroniza as duas fontes e baixa um ZIP com os CSVs.
-              “Puxar histórico OTC” pede ~45 dias à Pocket e grava velas antigas
-              (ex.: 08/07), não só o incremental a partir do último salvo.
+              “Puxar histórico OTC” pagina a API Pocket para trás (até ~400 dias /
+              2024) e grava cada lote — não só o incremental recente.
               Após o fechamento diário (e no fim de semana) o spread usa o
               último close do EURUSD vs cada vela OTC ainda aberta.
             </p>
@@ -815,15 +815,16 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Puxando histórico profundo EURUSD_otc da Pocket (~45 dias)…";
+            "Puxando histórico OTC da Pocket (paginado, até ~600 dias / fim de 2024)… pode demorar alguns minutos.";
           const st = await api("/api/ohlc-spread/backfill-otc", "POST", {
-            days: 45,
+            days: 600,
             asset: "EURUSD_otc",
           });
           renderStatus(st);
           const bf = st.backfill_otc || {};
           document.getElementById("s-msg").textContent =
             `Histórico OTC: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.pages != null ? ` · ${bf.pages} páginas` : "") +
             (bf.oldest ? ` · ${bf.oldest} → ${bf.newest || "?"}` : "") +
             (bf.stored_oldest ? ` · mais antigo salvo: ${bf.stored_oldest}` : "");
           await loadCharts();
