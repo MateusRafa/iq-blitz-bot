@@ -196,8 +196,10 @@
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Ativo <strong>fixo</strong>. Sync puxa só o que falta a partir do
-              <strong>último candle salvo</strong> no Supabase.
+              Ativo <strong>fixo</strong>. O sync horário puxa só o que falta a
+              partir do <strong>último candle salvo</strong>. Use
+              <strong>Puxar histórico</strong> para buscar o passado (ex.: 2024)
+              via API paginada da Pocket.
             </p>
             <div class="duration-row">
               <label for="asset-input">Ativo</label>
@@ -207,6 +209,7 @@
             <div class="controls" style="margin-top:0.85rem">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-history">Puxar histórico</button>
               <button type="button" class="btn btn-apply" id="btn-reload-chart">Atualizar gráfico</button>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
@@ -1444,6 +1447,29 @@
           const st = await api("/api/ohlc/stop", "POST");
           render(st);
           await loadChart(st.asset, true);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-history").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Puxando histórico da Pocket (paginado, até ~600 dias / 2024)… pode demorar alguns minutos.";
+          const st = await api("/api/ohlc/backfill-history", "POST", {
+            days: 600,
+            asset: assetInput.value.trim() || "EURUSD_otc",
+          });
+          render(st);
+          const bf = st.backfill || {};
+          document.getElementById("s-msg").textContent =
+            `Histórico: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.pages != null ? ` · ${bf.pages} páginas` : "") +
+            (bf.oldest ? ` · ${bf.oldest} → ${bf.newest || "?"}` : "") +
+            (bf.stored_oldest ? ` · mais antigo no DB: ${bf.stored_oldest}` : "");
+          await loadChart(st.asset || assetInput.value.trim(), true);
           setCmdErro("");
         } catch (e) {
           setCmdErro(e.message || String(e));
