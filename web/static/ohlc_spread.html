@@ -209,6 +209,69 @@
             <p class="message" id="ou-msg"></p>
           </div>
 
+          <div class="panel" id="paper-panel">
+            <h2>Paper trading — Fase 2</h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Regra: <code>|z| ≥ z_min</code> e
+              <code>p̂ ≥ 1/(1+payout) + margem</code>. Escolhe o melhor T
+              entre 1h/2h/4h. Sem auto-ordem — registre o resultado à mão
+              (WIN/LOSS) para validar se a EV do modelo se confirma.
+            </p>
+            <div class="controls" style="flex-wrap:wrap;gap:0.5rem;align-items:end">
+              <label class="message" style="margin:0">
+                Payout %
+                <input id="paper-payout" type="number" min="1" max="200" step="1" value="92" style="width:5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                |z| mín
+                <input id="paper-zmin" type="number" min="0" max="5" step="0.1" value="1.5" style="width:4.5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                Margem
+                <input id="paper-edge" type="number" min="0" max="20" step="0.5" value="3" title="Pontos percentuais acima do breakeven" style="width:4.5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                Stake
+                <input id="paper-stake" type="number" min="1" step="1" value="100" style="width:5rem;margin-left:0.35rem" />
+              </label>
+              <button type="button" class="btn btn-apply" id="btn-paper-refresh">Recalcular sinal</button>
+              <button type="button" class="btn btn-start" id="btn-paper-log" disabled>Registrar paper</button>
+            </div>
+            <div class="status-grid" style="margin-top:0.75rem">
+              <div class="status-item"><span class="label">Ação</span><span class="value" id="paper-action">—</span></div>
+              <div class="status-item"><span class="label">Lado OTC</span><span class="value" id="paper-side">—</span></div>
+              <div class="status-item"><span class="label">Expiry</span><span class="value" id="paper-horizon">—</span></div>
+              <div class="status-item"><span class="label">p̂</span><span class="value" id="paper-phat">—</span></div>
+              <div class="status-item"><span class="label">p necessária</span><span class="value" id="paper-pneed">—</span></div>
+              <div class="status-item"><span class="label">EV / stake</span><span class="value" id="paper-ev">—</span></div>
+              <div class="status-item"><span class="label">z</span><span class="value" id="paper-z">—</span></div>
+              <div class="status-item"><span class="label">Paper PnL</span><span class="value" id="paper-pnl">—</span></div>
+            </div>
+            <p class="message" id="paper-msg"></p>
+            <div class="controls" style="margin-top:0.35rem">
+              <button type="button" class="btn btn-mode" id="btn-paper-export">Exportar log CSV</button>
+              <button type="button" class="btn btn-mode" id="btn-paper-clear">Limpar log</button>
+            </div>
+            <div style="overflow:auto;max-height:240px;margin-top:0.5rem">
+              <table id="paper-table" style="width:100%;border-collapse:collapse;font-size:0.8rem;color:#94a3b8">
+                <thead>
+                  <tr style="text-align:left;border-bottom:1px solid rgba(34,211,238,0.25)">
+                    <th style="padding:0.35rem">Quando</th>
+                    <th>Ação</th>
+                    <th>Lado</th>
+                    <th>T</th>
+                    <th>p̂</th>
+                    <th>Pay</th>
+                    <th>Stake</th>
+                    <th>z</th>
+                    <th>Resultado</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="panel">
             <h2>Preços 1h</h2>
             <div class="chart-modes" role="group" aria-label="Layout">
@@ -276,6 +339,11 @@
       const PRICE_STYLE_KEY = "iq_blitz_spread_price_style";
       const RANGE_KEY = "iq_blitz_spread_visible_range";
       const DRAW_KEY = "iq_blitz_spread_user_lines";
+      const PAPER_LOG_KEY = "iq_blitz_spread_paper_log";
+      const PAPER_PAYOUT_KEY = "iq_blitz_spread_paper_payout";
+      const PAPER_ZMIN_KEY = "iq_blitz_spread_paper_zmin";
+      const PAPER_EDGE_KEY = "iq_blitz_spread_paper_edge";
+      const PAPER_STAKE_KEY = "iq_blitz_spread_paper_stake";
       const LINE_COLORS = [
         "#f472b6",
         "#34d399",
@@ -1542,8 +1610,231 @@
       }
 
       async function loadOu() {
-        const data = await api("/api/ohlc-spread/ou?paired_only=true&min_n=48");
+        const payoutPct = Number(document.getElementById("paper-payout")?.value || 92);
+        const zMin = Number(document.getElementById("paper-zmin")?.value || 1.5);
+        const edgePct = Number(document.getElementById("paper-edge")?.value || 3);
+        const q =
+          "/api/ohlc-spread/ou?paired_only=true&min_n=48" +
+          "&payout=" +
+          encodeURIComponent(payoutPct / 100) +
+          "&z_min=" +
+          encodeURIComponent(zMin) +
+          "&edge_margin=" +
+          encodeURIComponent(edgePct / 100);
+        const data = await api(q);
         renderOu(data);
+        renderPaperSignal(data);
+        try {
+          localStorage.setItem(PAPER_PAYOUT_KEY, String(payoutPct));
+          localStorage.setItem(PAPER_ZMIN_KEY, String(zMin));
+          localStorage.setItem(PAPER_EDGE_KEY, String(edgePct));
+        } catch (_) {}
+      }
+
+      let lastPaperSignal = null;
+
+      function loadPaperLog() {
+        try {
+          const raw = localStorage.getItem(PAPER_LOG_KEY);
+          if (!raw) return [];
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+          return [];
+        }
+      }
+
+      function savePaperLog(rows) {
+        try {
+          localStorage.setItem(PAPER_LOG_KEY, JSON.stringify(rows.slice(0, 500)));
+        } catch (_) {}
+      }
+
+      function paperStats(rows) {
+        let wins = 0;
+        let losses = 0;
+        let pnl = 0;
+        for (const r of rows) {
+          if (r.result === "WIN") {
+            wins += 1;
+            pnl += Number(r.stake || 0) * Number(r.payout || 0);
+          } else if (r.result === "LOSS") {
+            losses += 1;
+            pnl -= Number(r.stake || 0);
+          }
+        }
+        const done = wins + losses;
+        const wr = done ? wins / done : null;
+        return { wins, losses, done, wr, pnl };
+      }
+
+      function renderPaperTable() {
+        const tbody = document.getElementById("paper-tbody");
+        if (!tbody) return;
+        const rows = loadPaperLog();
+        const st = paperStats(rows);
+        const pnlEl = document.getElementById("paper-pnl");
+        if (pnlEl) {
+          pnlEl.textContent =
+            st.done === 0
+              ? "—"
+              : (st.pnl >= 0 ? "+" : "") +
+                st.pnl.toFixed(2) +
+                " · " +
+                st.wins +
+                "W/" +
+                st.losses +
+                "L" +
+                (st.wr != null ? " · WR " + (st.wr * 100).toFixed(0) + "%" : "");
+        }
+        tbody.innerHTML = "";
+        for (const r of rows) {
+          const tr = document.createElement("tr");
+          tr.style.borderBottom = "1px solid rgba(148,163,184,0.12)";
+          const when = r.ts
+            ? new Date(r.ts).toLocaleString("pt-BR", { hour12: false })
+            : "—";
+          const resultCell =
+            r.result === "PENDING"
+              ? `<button type="button" class="btn btn-mode" data-paper-win="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">W</button>
+                 <button type="button" class="btn btn-mode" data-paper-loss="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">L</button>
+                 <button type="button" class="btn btn-mode" data-paper-void="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">∅</button>`
+              : String(r.result || "—");
+          tr.innerHTML =
+            `<td style="padding:0.35rem;white-space:nowrap">${when}</td>` +
+            `<td>${r.action || "—"}</td>` +
+            `<td>${r.otc_side || "—"}</td>` +
+            `<td>${r.horizon || "—"}</td>` +
+            `<td>${r.p_hat != null ? (Number(r.p_hat) * 100).toFixed(1) + "%" : "—"}</td>` +
+            `<td>${r.payout != null ? (Number(r.payout) * 100).toFixed(0) + "%" : "—"}</td>` +
+            `<td>${r.stake != null ? r.stake : "—"}</td>` +
+            `<td>${r.z != null ? Number(r.z).toFixed(2) : "—"}</td>` +
+            `<td>${resultCell}</td>`;
+          tbody.appendChild(tr);
+        }
+        tbody.querySelectorAll("[data-paper-win]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-win"), "WIN"));
+        });
+        tbody.querySelectorAll("[data-paper-loss]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-loss"), "LOSS"));
+        });
+        tbody.querySelectorAll("[data-paper-void]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-void"), "VOID"));
+        });
+      }
+
+      function setPaperResult(id, result) {
+        const rows = loadPaperLog();
+        const i = rows.findIndex((r) => String(r.id) === String(id));
+        if (i < 0) return;
+        rows[i].result = result;
+        rows[i].resolved_at = Date.now();
+        savePaperLog(rows);
+        renderPaperTable();
+      }
+
+      function renderPaperSignal(payload) {
+        const sig = (payload && payload.signal) || {};
+        lastPaperSignal = sig;
+        const set = (id, text) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = text;
+        };
+        const action = sig.action || "SKIP";
+        set("paper-action", action);
+        const actionEl = document.getElementById("paper-action");
+        if (actionEl) {
+          actionEl.style.color = action === "GO" ? "#34d399" : "#f87171";
+        }
+        set("paper-side", sig.otc_side || "—");
+        set("paper-horizon", sig.horizon || "—");
+        set("paper-phat", fmtPct(sig.p_hat));
+        set("paper-pneed", fmtPct(sig.p_need));
+        set(
+          "paper-ev",
+          sig.ev != null && Number.isFinite(Number(sig.ev))
+            ? (Number(sig.ev) >= 0 ? "+" : "") + Number(sig.ev).toFixed(3)
+            : "—"
+        );
+        set("paper-z", fmtNum(sig.z, 2));
+        const reasons = Array.isArray(sig.reasons) ? sig.reasons.join(" · ") : "";
+        set("paper-msg", reasons || "—");
+        const logBtn = document.getElementById("btn-paper-log");
+        if (logBtn) logBtn.disabled = action !== "GO";
+      }
+
+      function registerPaperTrade() {
+        if (!lastPaperSignal || lastPaperSignal.action !== "GO") return;
+        const stake = Number(document.getElementById("paper-stake")?.value || 100);
+        try {
+          localStorage.setItem(PAPER_STAKE_KEY, String(stake));
+        } catch (_) {}
+        const rows = loadPaperLog();
+        rows.unshift({
+          id: String(Date.now()) + "-" + Math.floor(Math.random() * 1e6),
+          ts: Date.now(),
+          action: "GO",
+          otc_side: lastPaperSignal.otc_side,
+          horizon: lastPaperSignal.horizon,
+          hours: lastPaperSignal.hours,
+          p_hat: lastPaperSignal.p_hat,
+          payout: lastPaperSignal.payout,
+          ev: lastPaperSignal.ev,
+          z: lastPaperSignal.z,
+          stake: stake,
+          result: "PENDING",
+        });
+        savePaperLog(rows);
+        renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.textContent =
+            "Paper registrado: " +
+            lastPaperSignal.otc_side +
+            " " +
+            lastPaperSignal.horizon +
+            " · marque W/L quando o expiry da Pocket terminar.";
+        }
+      }
+
+      function exportPaperCsv() {
+        const rows = loadPaperLog();
+        const header = [
+          "ts_iso",
+          "action",
+          "otc_side",
+          "horizon",
+          "p_hat",
+          "payout",
+          "stake",
+          "z",
+          "ev",
+          "result",
+        ];
+        const lines = [header.join(",")];
+        for (const r of rows) {
+          lines.push(
+            [
+              r.ts ? new Date(r.ts).toISOString() : "",
+              r.action || "",
+              r.otc_side || "",
+              r.horizon || "",
+              r.p_hat != null ? r.p_hat : "",
+              r.payout != null ? r.payout : "",
+              r.stake != null ? r.stake : "",
+              r.z != null ? r.z : "",
+              r.ev != null ? r.ev : "",
+              r.result || "",
+            ].join(",")
+          );
+        }
+        const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "paper_ou_trades.csv";
+        a.click();
+        URL.revokeObjectURL(url);
       }
 
       async function refresh() {
@@ -1594,6 +1885,51 @@
       wireDrawControls("spread");
       syncOverlayButtons();
       syncPriceStyleButton();
+
+      (function initPaperControls() {
+        const payoutEl = document.getElementById("paper-payout");
+        const zEl = document.getElementById("paper-zmin");
+        const edgeEl = document.getElementById("paper-edge");
+        const stakeEl = document.getElementById("paper-stake");
+        try {
+          if (payoutEl && localStorage.getItem(PAPER_PAYOUT_KEY)) {
+            payoutEl.value = localStorage.getItem(PAPER_PAYOUT_KEY);
+          }
+          if (zEl && localStorage.getItem(PAPER_ZMIN_KEY)) {
+            zEl.value = localStorage.getItem(PAPER_ZMIN_KEY);
+          }
+          if (edgeEl && localStorage.getItem(PAPER_EDGE_KEY)) {
+            edgeEl.value = localStorage.getItem(PAPER_EDGE_KEY);
+          }
+          if (stakeEl && localStorage.getItem(PAPER_STAKE_KEY)) {
+            stakeEl.value = localStorage.getItem(PAPER_STAKE_KEY);
+          }
+        } catch (_) {}
+        const btnRef = document.getElementById("btn-paper-refresh");
+        if (btnRef) {
+          btnRef.addEventListener("click", async () => {
+            try {
+              await loadOu();
+              setCmdErro("");
+            } catch (e) {
+              setCmdErro(e.message || String(e));
+            }
+          });
+        }
+        const btnLog = document.getElementById("btn-paper-log");
+        if (btnLog) btnLog.addEventListener("click", () => registerPaperTrade());
+        const btnExp = document.getElementById("btn-paper-export");
+        if (btnExp) btnExp.addEventListener("click", () => exportPaperCsv());
+        const btnClr = document.getElementById("btn-paper-clear");
+        if (btnClr) {
+          btnClr.addEventListener("click", () => {
+            if (!confirm("Limpar todo o log paper deste navegador?")) return;
+            savePaperLog([]);
+            renderPaperTable();
+          });
+        }
+        renderPaperTable();
+      })();
 
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
