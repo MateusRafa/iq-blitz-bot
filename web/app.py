@@ -57,6 +57,13 @@ class OhlcSpreadSyncBody(BaseModel):
     days: int = Field(default=14, ge=1, le=90)
 
 
+class OhlcSpreadOtcHistoryBody(BaseModel):
+    """Backfill profundo OTC Pocket (grava velas antigas, nao so incremental)."""
+
+    days: int = Field(default=45, ge=7, le=120)
+    asset: str | None = Field(default=None, min_length=1, max_length=64)
+
+
 def _control_token() -> str:
     return os.environ.get("CONTROL_TOKEN", "").strip()
 
@@ -440,6 +447,29 @@ def ohlc_spread_pull_now(
     if not eu.get("ok"):
         detail = eu.get("error") or "Falha ao sincronizar Dukascopy EURUSD"
         raise HTTPException(status_code=502, detail=detail)
+    return st
+
+
+@app.post("/api/ohlc-spread/backfill-otc")
+def ohlc_spread_backfill_otc(
+    body: OhlcSpreadOtcHistoryBody = OhlcSpreadOtcHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa historico profundo EURUSD_otc da Pocket (inclui dias antes do 1o salvo)."""
+    otc_a = normalize_asset(
+        body.asset
+        or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+        or collector.status().get("asset")
+        or "EURUSD_otc"
+    )
+    try:
+        pull = collector.pull_history(otc_a, days=body.days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_status(_)
+    st["backfill_otc"] = pull.get("pull")
     return st
 
 
