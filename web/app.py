@@ -32,6 +32,18 @@ app = FastAPI(title="IQ Blitz Bot — Portal", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
+def _html_page(name: str) -> FileResponse:
+    """Serve HTML sem cache (evita botao/texto antigo apos deploy no Railway)."""
+    return FileResponse(
+        STATIC / name,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 class DurationBody(BaseModel):
     """Duracao da 1a ordem: seconds OU minutes (um dos dois)."""
 
@@ -93,27 +105,27 @@ def require_token(
 
 @app.get("/")
 def portal_page() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return _html_page("index.html")
 
 
 @app.get("/bot")
 def bot_page() -> FileResponse:
-    return FileResponse(STATIC / "bot.html")
+    return _html_page("bot.html")
 
 
 @app.get("/ohlc")
 def ohlc_page() -> FileResponse:
-    return FileResponse(STATIC / "ohlc.html")
+    return _html_page("ohlc.html")
 
 
 @app.get("/ohlc-1d")
 def ohlc_1d_page() -> FileResponse:
-    return FileResponse(STATIC / "ohlc_1d.html")
+    return _html_page("ohlc_1d.html")
 
 
 @app.get("/ohlc-spread")
 def ohlc_spread_page() -> FileResponse:
-    return FileResponse(STATIC / "ohlc_spread.html")
+    return _html_page("ohlc_spread.html")
 
 
 @app.get("/ohlc-1m")
