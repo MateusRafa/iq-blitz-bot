@@ -138,8 +138,9 @@
               <strong>Dukascopy</strong> (UTC / Bid) para
               <code>ohlc_candles_eurusd</code>.
               “Baixar dados” sincroniza as duas fontes e baixa um ZIP com os CSVs.
-              “Puxar histórico OTC” pagina a API Pocket para trás (até ~400 dias /
-              2024) e grava cada lote — não só o incremental recente.
+              “Puxar histórico OTC” pagina a API Pocket para trás.
+              “Puxar histórico Dukascopy” baixa EURUSD desde o candle OTC mais
+              antigo no Supabase, para casar as duas séries no gráfico.
               Após o fechamento diário (e no fim de semana) o spread usa o
               último close do EURUSD vs cada vela OTC ainda aberta.
             </p>
@@ -148,6 +149,7 @@
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
               <button type="button" class="btn btn-apply" id="btn-pull">Sincronizar agora</button>
               <button type="button" class="btn btn-apply" id="btn-otc-history">Puxar histórico OTC</button>
+              <button type="button" class="btn btn-apply" id="btn-duka-history">Puxar histórico Dukascopy</button>
               <button type="button" class="btn btn-apply" id="btn-download">Baixar dados</button>
               <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
             </div>
@@ -827,6 +829,31 @@
             (bf.pages != null ? ` · ${bf.pages} páginas` : "") +
             (bf.oldest ? ` · ${bf.oldest} → ${bf.newest || "?"}` : "") +
             (bf.stored_oldest ? ` · mais antigo salvo: ${bf.stored_oldest}` : "");
+          await loadCharts();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-duka-history").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Puxando histórico Dukascopy alinhado ao EURUSD_otc… pode demorar vários minutos.";
+          const st = await api("/api/ohlc-spread/backfill-dukascopy", "POST", {
+            days: 600,
+            match_otc: true,
+            otc_asset: "EURUSD_otc",
+          });
+          renderStatus(st);
+          const bf = st.backfill_dukascopy || {};
+          document.getElementById("s-msg").textContent =
+            `Histórico Dukascopy: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
+            (bf.from ? ` · pedido ${bf.from} → ${bf.to || "?"}` : "") +
+            (bf.stored_oldest
+              ? ` · salvo ${bf.stored_oldest} → ${bf.newest || "?"}`
+              : "");
           await loadCharts();
         } catch (e) {
           setCmdErro(e.message || String(e));
