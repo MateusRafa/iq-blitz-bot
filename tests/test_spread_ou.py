@@ -3,7 +3,12 @@
 import math
 import random
 
-from bot.spread_ou import analyze_spread_ou, estimate_ar1, prob_reversion_move
+from bot.spread_ou import (
+    analyze_spread_ou,
+    estimate_ar1,
+    evaluate_paper_signal,
+    prob_reversion_move,
+)
 
 
 def _ar1_series(n: int, a: float, b: float, sigma: float, seed: int = 1) -> list[float]:
@@ -69,3 +74,64 @@ def test_analyze_spread_ou_paired_filter():
 def test_estimate_ar1_too_few_points():
     est = estimate_ar1([0.1, 0.2, 0.15], min_n=48)
     assert est["ok"] is False
+
+
+def test_evaluate_paper_signal_go_with_high_payout():
+    ou = {
+        "ok": True,
+        "mean_reverting": True,
+        "z": -1.6,
+        "theta": 0.001,
+        "x_last": -0.03,
+        "half_life_hours": 40.0,
+        "horizons": {
+            "1h": {
+                "hours": 1,
+                "usable": True,
+                "p_reversion": 0.55,
+                "otc_bias": "call",
+                "side_spread": "up",
+                "min_payout": 0.82,
+            },
+            "2h": {
+                "hours": 2,
+                "usable": True,
+                "p_reversion": 0.57,
+                "otc_bias": "call",
+                "side_spread": "up",
+                "min_payout": 0.75,
+            },
+            "4h": {
+                "hours": 4,
+                "usable": True,
+                "p_reversion": 0.60,
+                "otc_bias": "call",
+                "side_spread": "up",
+                "min_payout": 0.67,
+            },
+        },
+    }
+    sig = evaluate_paper_signal(ou, payout=0.92, z_min=1.5, edge_margin=0.03)
+    assert sig["action"] == "GO"
+    assert sig["otc_side"] == "CALL"
+    assert sig["horizon"] == "4h"
+    assert sig["ev"] > 0
+
+
+def test_evaluate_paper_signal_skip_low_z():
+    ou = {
+        "ok": True,
+        "mean_reverting": True,
+        "z": -0.4,
+        "horizons": {
+            "4h": {
+                "hours": 4,
+                "usable": True,
+                "p_reversion": 0.7,
+                "otc_bias": "call",
+                "side_spread": "up",
+            }
+        },
+    }
+    sig = evaluate_paper_signal(ou, payout=0.92, z_min=1.5, edge_margin=0.03)
+    assert sig["action"] == "SKIP"
