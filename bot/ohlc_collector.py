@@ -299,37 +299,39 @@ class OhlcCollector:
         self,
         asset: str | None = None,
         *,
-        days: int = 45,
+        days: int = 600,
     ) -> dict[str, Any]:
-        """Backfill profundo: pede N dias a Pocket e grava TODAS as velas.
+        """Backfill profundo paginado via get_candles_advanced.
 
-        Diferente de pull_now (incremental a partir do ultimo salvo), isto
-        nao descarta candles antigas — cobre buracos antes do primeiro dia
-        que ja temos no Supabase (ex.: UI Pocket mostra 08/07 e so temos 20/07).
+        A UI Pocket mostra OTC ate 2024; get_candles simples so devolve uma
+        janela curta. Aqui paginamos para tras ate `days` (ou ate a API
+        parar de devolver velas novas), gravando cada pagina no Supabase.
         """
         ok, msg = supabase_ok()
         if not ok:
             raise RuntimeError(msg)
-        ndays = max(1, min(int(days), 120))
-        offset = ndays * 86400 + TIMEFRAMES["1h"] * 3
+        ndays = max(1, min(int(days), 800))
         client: PocketOption | None = None
         target = normalize_asset(asset) if asset else self._asset
         upserted = 0
         fetched = 0
+        pages = 0
         oldest = None
         newest = None
         try:
             self._set(
                 phase="history_pull",
-                message=f"Historico OTC Pocket ~{ndays}d ({target})…",
+                message=f"Historico OTC Pocket ~{ndays}d paginado ({target})…",
                 error=None,
                 next_fetch_at=None,
             )
             client = self._connect()
-            rows = self._fetch_tf(client, target, "1h", offset)
+            rows, pages = self._fetch_history_paged(
+                client, target, "1h", days=ndays
+            )
             fetched = len(rows)
             if rows:
-                times = []
+                times: list[datetime] = []
                 for row in rows:
                     try:
                         ts = datetime.fromisoformat(
@@ -341,13 +343,13 @@ class OhlcCollector:
                 if times:
                     oldest = min(times).isoformat()
                     newest = max(times).isoformat()
-                # Grava tudo (upsert idempotente) — nao filtra pelo ultimo salvo.
                 upserted = upsert_candles(rows)
             was_running = self.is_running()
             self._set(
                 phase="waiting" if was_running else "idle",
                 message=(
                     f"Historico OTC ok: {upserted}/{fetched} velas "
+                    f"em {pages} paginas "
                     f"({oldest or '?'} → {newest or '?'})"
                 ),
             )
@@ -376,8 +378,8 @@ class OhlcCollector:
             "mode": "history",
             "upserted": upserted,
             "fetched": fetched,
+            "pages": pages,
             "days": ndays,
-            "offset_sec": offset,
             "asset": target,
             "oldest": oldest,
             "newest": newest,
@@ -390,6 +392,112 @@ class OhlcCollector:
         except Exception:  # noqa: BLE001
             pass
         return st
+
+    def _fetch_history_paged(
+        self,
+        client: PocketOption,
+        asset: str,
+        tf: str,
+        *,
+        days: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Pagina para tras com get_candles_advanced(asset, period, offset, time)."""
+        period = TIMEFRAMES[tf]
+        chunk_days = max(3, min(_env_int("OHLC_OTC_HISTORY_CHUNK_DAYS", 14), 30))
+        chunk_sec = chunk_days * 86400
+        target_start = datetime.now(timezone.utc) - timedelta(days=days)
+        target_ts = int(target_start.timestamp())
+        ref = int(datetime.now(timezone.utc).timestamp())
+        by_key: dict[str, dict[str, Any]] = {}
+        pages = 0
+        max_pages = max(30, (days // chunk_days) + 10)
+        stagnant = 0
+
+        while pages < max_pages and ref > target_ts:
+            pages += 1
+            self._set(
+                message=(
+                    f"Historico OTC pagina {pages}/{max_pages} "
+                    f"(~{chunk_days}d, ref={datetime.fromtimestamp(ref, tz=timezone.utc).date()})…"
+                )
+            )
+            raw: list[Any] = []
+            try:
+                if hasattr(client, "get_candles_advanced"):
+                    raw = client.get_candles_advanced(
+                        asset, period, int(chunk_sec), int(ref)
+                    )
+                else:
+                    raw = client.get_candles(asset, period, int(chunk_sec))
+            except Exception as exc:  # noqa: BLE001
+                if pages == 1:
+                    # Fallback: um get_candles grande.
+                    try:
+                        raw = client.get_candles(
+                            asset, period, int(days * 86400)
+                        )
+                    except Exception as exc2:  # noqa: BLE001
+                        raise RuntimeError(
+                            f"Pocket historico falhou: {exc2}"
+                        ) from exc2
+                else:
+                    self._set(message=f"Pagina {pages} falhou ({exc}); parando.")
+                    break
+            if not isinstance(raw, list) or not raw:
+                break
+
+            before = len(by_key)
+            page_times: list[int] = []
+            page_rows: list[dict[str, Any]] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                norm = normalize_candle(item, asset=asset, timeframe=tf)
+                if not norm:
+                    continue
+                key = str(norm["opened_at"])[:19]
+                by_key[key] = norm
+                page_rows.append(norm)
+                try:
+                    ts = datetime.fromisoformat(
+                        str(norm["opened_at"]).replace("Z", "+00:00")
+                    )
+                    page_times.append(int(ts.timestamp()))
+                except ValueError:
+                    continue
+
+            # Grava a pagina ja (progresso se o HTTP do Railway cortar).
+            if page_rows:
+                try:
+                    upsert_candles(page_rows)
+                except Exception as exc:  # noqa: BLE001
+                    self._set(message=f"Upsert pagina {pages}: {exc}")
+
+            added = len(by_key) - before
+            if added <= 0 or not page_times:
+                stagnant += 1
+                if stagnant >= 2:
+                    break
+            else:
+                stagnant = 0
+
+            oldest_page = min(page_times)
+            if oldest_page <= target_ts:
+                break
+            if oldest_page >= ref:
+                # Sem progresso no eixo do tempo.
+                stagnant += 1
+                if stagnant >= 2:
+                    break
+                ref = ref - chunk_sec
+            else:
+                # Proxima pagina: imediatamente antes da vela mais antiga.
+                ref = oldest_page - 1
+
+            time.sleep(0.35)
+
+        rows = sorted(by_key.values(), key=lambda r: str(r.get("opened_at") or ""))
+        return rows, pages
 
     def _set(self, **kwargs: Any) -> None:
         with self._lock:
