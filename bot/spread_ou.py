@@ -252,3 +252,137 @@ def analyze_spread_ou(
         "horizons": horizons_out,
         "best": best,
     }
+
+
+def breakeven_p(payout: float) -> float:
+    """Probabilidade minima para EV=0 com payout fracional (ex.: 0.92)."""
+    if payout <= 0:
+        return 1.0
+    return 1.0 / (1.0 + payout)
+
+
+def ev_per_unit(p_hat: float, payout: float) -> float:
+    """EV por 1 unidade de stake: p*payout - (1-p)."""
+    return p_hat * payout - (1.0 - p_hat)
+
+
+def evaluate_paper_signal(
+    ou: dict[str, Any],
+    *,
+    payout: float = 0.92,
+    z_min: float = 1.5,
+    edge_margin: float = 0.03,
+    prefer_longest: bool = True,
+) -> dict[str, Any]:
+    """Fase 2: regra paper GO/SKIP para binaria OTC.
+
+    Entra se:
+      - OU ok e mean-reverting
+      - |z| >= z_min
+      - existe horizonte T em {1h,2h,4h} com
+        p_hat >= breakeven(payout) + edge_margin
+      - otc_bias call|put
+
+    Escolhe T: entre os elegiveis, o de maior p_hat;
+    se prefer_longest e empate proximo, favorece 4h.
+    """
+    payout = float(payout)
+    if payout > 2:
+        # UI pode mandar 92 em vez de 0.92
+        payout = payout / 100.0
+    payout = max(0.01, min(payout, 5.0))
+    z_min = max(0.0, float(z_min))
+    edge_margin = max(0.0, float(edge_margin))
+
+    p_be = breakeven_p(payout)
+    p_need = min(0.99, p_be + edge_margin)
+
+    reasons: list[str] = []
+    base = {
+        "action": "SKIP",
+        "payout": payout,
+        "p_breakeven": p_be,
+        "p_need": p_need,
+        "z_min": z_min,
+        "edge_margin": edge_margin,
+        "reasons": reasons,
+    }
+
+    if not ou.get("ok"):
+        reasons.append(ou.get("error") or "OU indisponivel")
+        return base
+    if not ou.get("mean_reverting"):
+        reasons.append("Sem mean-reversion (phi fora de (0,1))")
+        return base
+
+    z = ou.get("z")
+    if z is None or not math.isfinite(float(z)):
+        reasons.append("z indisponivel")
+        return base
+    z = float(z)
+    if abs(z) < z_min:
+        reasons.append(f"|z|={abs(z):.2f} < z_min={z_min:.2f}")
+        return {**base, "z": z}
+
+    horizons = ou.get("horizons") or {}
+    eligible: list[dict[str, Any]] = []
+    for key in ("1h", "2h", "4h"):
+        h = horizons.get(key) or {}
+        if not h.get("usable"):
+            continue
+        bias = str(h.get("otc_bias") or "")
+        if bias not in ("call", "put"):
+            continue
+        p = float(h.get("p_reversion") or 0.0)
+        if p < p_need:
+            continue
+        eligible.append(
+            {
+                "horizon": key,
+                "hours": int(h.get("hours") or int(key.replace("h", ""))),
+                "p_hat": p,
+                "otc_side": bias.upper(),
+                "side_spread": h.get("side_spread"),
+                "ev": ev_per_unit(p, payout),
+                "min_payout": h.get("min_payout"),
+            }
+        )
+
+    if not eligible:
+        reasons.append(
+            f"Nenhum horizonte com p̂ >= {p_need:.1%} "
+            f"(breakeven {p_be:.1%} + margem {edge_margin:.1%})"
+        )
+        return {**base, "z": z}
+
+    # Maior p_hat; desempate: horizonte mais longo se prefer_longest
+    def sort_key(item: dict[str, Any]) -> tuple:
+        if prefer_longest:
+            return (item["p_hat"], item["hours"])
+        return (item["p_hat"], -item["hours"])
+
+    chosen = max(eligible, key=sort_key)
+    return {
+        "action": "GO",
+        "payout": payout,
+        "p_breakeven": p_be,
+        "p_need": p_need,
+        "z_min": z_min,
+        "edge_margin": edge_margin,
+        "z": z,
+        "theta": ou.get("theta"),
+        "x_last": ou.get("x_last"),
+        "half_life_hours": ou.get("half_life_hours"),
+        "otc_side": chosen["otc_side"],
+        "side_spread": chosen["side_spread"],
+        "horizon": chosen["horizon"],
+        "hours": chosen["hours"],
+        "p_hat": chosen["p_hat"],
+        "ev": chosen["ev"],
+        "min_payout": chosen["min_payout"],
+        "eligible": eligible,
+        "reasons": [
+            f"GO {chosen['otc_side']} {chosen['horizon']} "
+            f"p̂={chosen['p_hat']:.1%} EV={chosen['ev']:+.3f}/stake"
+        ],
+    }
