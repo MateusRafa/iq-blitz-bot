@@ -190,10 +190,14 @@
             </div>
 
             <h2 style="margin-top:1.25rem">Spread (OTC − EURUSD)</h2>
+            <div class="chart-modes" role="group" aria-label="Camadas do spread">
+              <button type="button" class="btn btn-mode active" id="btn-after-hours">Fora do horário EURUSD</button>
+              <button type="button" class="btn btn-mode active" id="btn-opens">Abertura diária EURUSD</button>
+            </div>
             <div class="legend">
               <span class="lg-spread">Spread</span>
-              <span class="lg-wknd">fora do horário EURUSD</span>
-              <span class="lg-open">abertura diária EURUSD</span>
+              <span class="lg-wknd" id="lg-wknd">fora do horário EURUSD</span>
+              <span class="lg-open" id="lg-open">abertura diária EURUSD</span>
             </div>
             <div class="chart-wrap chart-wrap--spread" id="spread-chart-wrap">
               <div id="spread-chart" style="width:100%;height:100%"></div>
@@ -208,6 +212,8 @@
       const TOKEN_KEY = "iq_blitz_control_token";
       const LAYOUT_KEY = "iq_blitz_spread_layout";
       const LINK_KEY = "iq_blitz_spread_link";
+      const AFTER_HOURS_KEY = "iq_blitz_spread_after_hours";
+      const OPENS_KEY = "iq_blitz_spread_opens";
 
       function getToken() {
         return localStorage.getItem(TOKEN_KEY) || "";
@@ -244,11 +250,16 @@
       const btnOverlay = document.getElementById("btn-overlay");
       const btnSplit = document.getElementById("btn-split");
       const btnLink = document.getElementById("btn-link");
+      const btnAfterHours = document.getElementById("btn-after-hours");
+      const btnOpens = document.getElementById("btn-opens");
       const overlayWrap = document.getElementById("overlay-wrap");
       const splitWrap = document.getElementById("split-wrap");
 
       let layout = localStorage.getItem(LAYOUT_KEY) || "overlay";
       let linkOn = localStorage.getItem(LINK_KEY) === "1";
+      // Default ON se a chave ainda nao existe.
+      let showAfterHours = localStorage.getItem(AFTER_HOURS_KEY) !== "0";
+      let showOpens = localStorage.getItem(OPENS_KEY) !== "0";
       let priceChart = null;
       let otcChart = null;
       let euChart = null;
@@ -261,13 +272,14 @@
       let seriesWeekend = null;
       let lastMeta = "";
       let eurusdOpens = [];
+      let lastWeekendPoints = [];
+      let lastOpenMarkers = [];
       let openLinesBound = false;
       let chartLinkBound = false;
       let syncingCharts = false;
       let lastOtcCandles = [];
       let lastEuCandles = [];
       let lastSpreadPoints = [];
-
       function showAuth(err) {
         authBox.hidden = false;
         appBox.hidden = true;
@@ -541,6 +553,7 @@
         if (!ctx) return;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
+        if (!showOpens || !eurusdOpens.length) return;
         const ts = spreadChart.timeScale();
         ctx.strokeStyle = "rgba(34, 211, 238, 0.85)";
         ctx.lineWidth = 1.25;
@@ -561,6 +574,43 @@
         ctx.setLineDash([]);
       }
 
+      function syncOverlayButtons() {
+        if (btnAfterHours) btnAfterHours.classList.toggle("active", showAfterHours);
+        if (btnOpens) btnOpens.classList.toggle("active", showOpens);
+        const lgWknd = document.getElementById("lg-wknd");
+        const lgOpen = document.getElementById("lg-open");
+        if (lgWknd) lgWknd.style.opacity = showAfterHours ? "1" : "0.35";
+        if (lgOpen) lgOpen.style.opacity = showOpens ? "1" : "0.35";
+      }
+
+      function applySpreadOverlays() {
+        if (seriesWeekend) {
+          seriesWeekend.setData(showAfterHours ? lastWeekendPoints : []);
+        }
+        if (seriesSpread) {
+          try {
+            seriesSpread.setMarkers(showOpens ? lastOpenMarkers : []);
+          } catch (_) {
+            try {
+              seriesSpread.setMarkers([]);
+            } catch (__) {}
+          }
+        }
+        drawEurusdOpenLines();
+        syncOverlayButtons();
+      }
+
+      function setAfterHoursOn(on) {
+        showAfterHours = !!on;
+        localStorage.setItem(AFTER_HOURS_KEY, showAfterHours ? "1" : "0");
+        applySpreadOverlays();
+      }
+
+      function setOpensOn(on) {
+        showOpens = !!on;
+        localStorage.setItem(OPENS_KEY, showOpens ? "1" : "0");
+        applySpreadOverlays();
+      }
       function resizeAll() {
         for (const [chart, id] of [
           [priceChart, "price-chart"],
@@ -630,7 +680,7 @@
           value: p.spread,
         }));
         seriesSpread.setData(allSpread);
-        seriesWeekend.setData(weekend);
+        lastWeekendPoints = weekend;
         lastSpreadPoints = allSpread;
 
         eurusdOpens = (data.eurusd_opens || []).map((o) => ({
@@ -663,13 +713,8 @@
             text: "Open",
           });
         }
-        try {
-          seriesSpread.setMarkers(markers);
-        } catch (_) {
-          try {
-            seriesSpread.setMarkers([]);
-          } catch (__) {}
-        }
+        lastOpenMarkers = markers;
+        applySpreadOverlays();
         lastMeta =
           (data.otc_asset || "OTC") +
           " · " +
@@ -760,6 +805,15 @@
       btnOverlay.addEventListener("click", () => setLayout("overlay"));
       btnSplit.addEventListener("click", () => setLayout("split"));
       if (btnLink) btnLink.addEventListener("click", () => setLinkOn(!linkOn));
+      if (btnAfterHours) {
+        btnAfterHours.addEventListener("click", () =>
+          setAfterHoursOn(!showAfterHours)
+        );
+      }
+      if (btnOpens) {
+        btnOpens.addEventListener("click", () => setOpensOn(!showOpens));
+      }
+      syncOverlayButtons();
 
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
