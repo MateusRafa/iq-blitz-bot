@@ -16,9 +16,11 @@ from bot.ohlc_collector import seconds_until_next_hourly_fetch
 from bot.ohlc_store import (
     delete_candles_by_source,
     last_opened_at,
+    oldest_opened_at,
     stored_summary,
     supabase_ok,
     upsert_candles,
+    TABLE,
 )
 from bot.runner import normalize_asset
 
@@ -240,6 +242,166 @@ class OhlcCollectorEurusd:
             "asset": asset,
             "source": SOURCE,
         }
+        return st
+
+    def pull_history(
+        self,
+        *,
+        days: int | None = None,
+        match_otc: bool = True,
+        otc_asset: str | None = None,
+    ) -> dict[str, Any]:
+        """Backfill profundo Dukascopy para casar com o OTC (ou N dias).
+
+        match_otc=True: usa o opened_at mais antigo de EURUSD_otc no Supabase
+        como inicio (com 1 dia de folga). Senao usa `days` para tras.
+        """
+        ok, msg = supabase_ok()
+        if not ok:
+            raise RuntimeError(msg)
+        if not self._pull_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "Ja existe uma puxada Dukascopy em andamento. Aguarde."
+            )
+        asset = self._asset
+        upserted = 0
+        fetched = 0
+        chunks = 0
+        start: datetime | None = None
+        end: datetime | None = None
+        otc_a = normalize_asset(
+            otc_asset
+            or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+            or "EURUSD_otc"
+        )
+        try:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(
+                days=max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
+            )
+            matched_otc = False
+            if match_otc:
+                try:
+                    oldest_otc = oldest_opened_at(otc_a, "1h", table=TABLE)
+                except Exception:  # noqa: BLE001
+                    oldest_otc = None
+                if oldest_otc is not None:
+                    # 1 dia antes do OTC para alinhar abertura / carry.
+                    start = oldest_otc - timedelta(days=1)
+                    matched_otc = True
+
+            # Se ja houver Dukascopy mais antiga que o alvo, ainda rebaixa
+            # a janela inteira (sobrescreve) — prefer_incremental=False.
+            span_days = max(1, int((end - start).total_seconds() // 86400) + 1)
+            self._set(
+                phase="history_pull",
+                message=(
+                    f"Historico Dukascopy ~{span_days}d "
+                    f"({'casando OTC ' + otc_a if matched_otc else 'lookback'})…"
+                ),
+                error=None,
+                next_fetch_at=None,
+            )
+
+            chunk_hours = max(
+                12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 72), 168)
+            )
+            cursor = start
+            by_t: dict[str, dict[str, Any]] = {}
+            while cursor < end:
+                chunks += 1
+                piece_end = min(cursor + timedelta(hours=chunk_hours), end)
+                self._set(
+                    message=(
+                        f"Dukascopy chunk {chunks}: "
+                        f"{cursor.date()} → {piece_end.date()}…"
+                    )
+                )
+                part = fetch_eurusd_1h_rows_for_store(
+                    cursor, piece_end, asset=asset
+                )
+                for row in part:
+                    by_t[str(row["opened_at"])] = row
+                if part:
+                    n = upsert_candles(part, table=TABLE_EURUSD)
+                    upserted += n
+                    fetched += len(part)
+                    try:
+                        delete_candles_by_source(
+                            asset,
+                            timeframe="1h",
+                            source="pocket",
+                            table=TABLE_EURUSD,
+                            since=cursor,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                cursor = piece_end
+
+            rows = sorted(by_t.values(), key=lambda r: str(r["opened_at"]))
+            oldest = rows[0]["opened_at"] if rows else None
+            newest = rows[-1]["opened_at"] if rows else None
+            if upserted <= 0 and end.weekday() < 5:
+                raise RuntimeError(
+                    "Dukascopy historico retornou 0 velas. "
+                    "Datafeed indisponivel ou bloqueado."
+                )
+
+            was_running = self.is_running()
+            self._set(
+                phase="waiting" if was_running else "idle",
+                message=(
+                    f"Historico Dukascopy ok: {upserted}/{fetched} velas "
+                    f"em {chunks} chunks "
+                    f"({oldest or '?'} → {newest or '?'})"
+                ),
+                error=None,
+            )
+            with self._lock:
+                self._snap["last_upsert"] = upserted
+                self._snap["total_upserted"] = int(
+                    self._snap.get("total_upserted", 0) or 0
+                ) + upserted
+                self._snap["source"] = SOURCE
+                self._snap["last_sync_from"] = start.isoformat()
+                self._snap["last_sync_to"] = end.isoformat()
+                self._refresh_stored()
+        except Exception as exc:  # noqa: BLE001
+            self._set(
+                phase="error" if not self.is_running() else "waiting",
+                error=str(exc)[:300],
+                message=f"Historico Dukascopy falhou: {exc}",
+            )
+            raise
+        finally:
+            self._pull_lock.release()
+
+        st = self.status()
+        st["pull"] = {
+            "mode": "history",
+            "upserted": upserted,
+            "fetched": fetched,
+            "chunks": chunks,
+            "asset": asset,
+            "source": SOURCE,
+            "match_otc": match_otc,
+            "otc_asset": otc_a,
+            "from": start.isoformat() if start else None,
+            "to": end.isoformat() if end else None,
+            "oldest": None,
+            "newest": None,
+            "stored_oldest": None,
+        }
+        try:
+            old = oldest_opened_at(asset, "1h", table=TABLE_EURUSD)
+            last = last_opened_at(asset, "1h", table=TABLE_EURUSD)
+            if old is not None:
+                st["pull"]["stored_oldest"] = old.isoformat()
+                st["pull"]["oldest"] = old.isoformat()
+            if last is not None:
+                st["pull"]["newest"] = last.isoformat()
+        except Exception:  # noqa: BLE001
+            pass
         return st
 
     def _set(self, **kwargs: Any) -> None:
