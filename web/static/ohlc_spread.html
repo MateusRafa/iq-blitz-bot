@@ -91,6 +91,18 @@
         color: #94a3b8;
         margin: 0.25rem 0 0;
       }
+      .chart-wrap.drawing {
+        cursor: crosshair;
+      }
+      .draw-hint {
+        font-size: 0.78rem;
+        color: #67e8f9;
+        min-height: 1.1em;
+        margin: 0.15rem 0 0.25rem;
+      }
+      .draw-hint:empty {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -175,6 +187,13 @@
               <button type="button" class="btn btn-mode active" id="btn-price-style">Candles</button>
               <button type="button" class="btn btn-mode" id="btn-fit">Enquadrar</button>
             </div>
+            <div class="chart-modes" role="group" aria-label="Desenho no gráfico de preço">
+              <button type="button" class="btn btn-mode" id="btn-draw-price-h" title="Clique no gráfico para marcar o nível">Linha H</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-trend" title="Dois cliques: início e fim">Tendência</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-erase" title="Clique perto de uma linha para remover">Apagar</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-clear">Limpar linhas</button>
+            </div>
+            <p class="draw-hint" id="draw-hint-price"></p>
             <div class="legend">
               <span class="lg-otc">EURUSD_otc (Pocket)</span>
               <span class="lg-eu">EURUSD (Dukascopy)</span>
@@ -196,6 +215,13 @@
               <button type="button" class="btn btn-mode active" id="btn-after-hours">Fora do horário EURUSD</button>
               <button type="button" class="btn btn-mode active" id="btn-opens">Abertura diária EURUSD</button>
             </div>
+            <div class="chart-modes" role="group" aria-label="Desenho no gráfico de spread">
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-h" title="Clique no gráfico para marcar o nível">Linha H</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-trend" title="Dois cliques: início e fim">Tendência</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-erase" title="Clique perto de uma linha para remover">Apagar</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-clear">Limpar linhas</button>
+            </div>
+            <p class="draw-hint" id="draw-hint-spread"></p>
             <div class="legend">
               <span class="lg-spread">Spread</span>
               <span class="lg-wknd" id="lg-wknd">fora do horário EURUSD</span>
@@ -218,6 +244,16 @@
       const OPENS_KEY = "iq_blitz_spread_opens";
       const PRICE_STYLE_KEY = "iq_blitz_spread_price_style";
       const RANGE_KEY = "iq_blitz_spread_visible_range";
+      const DRAW_KEY = "iq_blitz_spread_user_lines";
+      const LINE_COLORS = [
+        "#f472b6",
+        "#34d399",
+        "#60a5fa",
+        "#fbbf24",
+        "#fb7185",
+        "#c084fc",
+        "#2dd4bf",
+      ];
 
       function getToken() {
         return localStorage.getItem(TOKEN_KEY) || "";
@@ -295,7 +331,33 @@
       let syncingCharts = false;
       let lastOtcCandles = [];
       let lastEuCandles = [];
-      let lastSpreadPoints = [];      function showAuth(err) {
+      let lastSpreadPoints = [];
+      let userLines = { price: [], spread: [] };
+      try {
+        const rawDraw = localStorage.getItem(DRAW_KEY);
+        if (rawDraw) {
+          const parsed = JSON.parse(rawDraw);
+          if (parsed && typeof parsed === "object") {
+            userLines = {
+              price: Array.isArray(parsed.price) ? parsed.price : [],
+              spread: Array.isArray(parsed.spread) ? parsed.spread : [],
+            };
+          }
+        }
+      } catch (_) {
+        userLines = { price: [], spread: [] };
+      }
+      let nextLineId =
+        Math.max(
+          0,
+          ...userLines.price.map((l) => l.id || 0),
+          ...userLines.spread.map((l) => l.id || 0)
+        ) + 1;
+      let drawMode = { price: null, spread: null };
+      let trendPending = { price: null, spread: null };
+      let drawRuntime = { price: [], spread: [] };
+      const drawClickBound =
+        typeof WeakSet !== "undefined" ? new WeakSet() : null;      function showAuth(err) {
         authBox.hidden = false;
         appBox.hidden = true;
         if (err) {
@@ -524,7 +586,373 @@
         localStorage.setItem(PRICE_STYLE_KEY, priceStyle);
         syncPriceStyleButton();
         recreatePriceSeries();
+        remountUserLines("price");
         applyVisibleRangeOrFit();
+      }
+
+      function saveUserLines() {
+        try {
+          localStorage.setItem(DRAW_KEY, JSON.stringify(userLines));
+        } catch (_) {}
+      }
+
+      function formatLinePrice(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return "";
+        const abs = Math.abs(n);
+        if (abs >= 1) return n.toFixed(5);
+        if (abs >= 0.01) return n.toFixed(5);
+        return n.toFixed(6);
+      }
+
+      function nextLineColor(scope) {
+        return LINE_COLORS[userLines[scope].length % LINE_COLORS.length];
+      }
+
+      function setDrawHint(scope, text) {
+        const el = document.getElementById(
+          scope === "spread" ? "draw-hint-spread" : "draw-hint-price"
+        );
+        if (el) el.textContent = text || "";
+      }
+
+      function syncDrawButtons(scope) {
+        const prefix = scope === "spread" ? "spread" : "price";
+        const mode = drawMode[scope];
+        const btnH = document.getElementById("btn-draw-" + prefix + "-h");
+        const btnT = document.getElementById("btn-draw-" + prefix + "-trend");
+        const btnE = document.getElementById("btn-draw-" + prefix + "-erase");
+        if (btnH) btnH.classList.toggle("active", mode === "h");
+        if (btnT) btnT.classList.toggle("active", mode === "trend");
+        if (btnE) btnE.classList.toggle("active", mode === "erase");
+        updateDrawCursor();
+      }
+
+      function updateDrawCursor() {
+        const priceOn = !!drawMode.price;
+        const spreadOn = !!drawMode.spread;
+        for (const id of ["price-chart", "otc-chart", "eu-chart"]) {
+          const el = document.getElementById(id);
+          if (el) el.classList.toggle("drawing", priceOn);
+        }
+        const sw = document.getElementById("spread-chart-wrap");
+        if (sw) sw.classList.toggle("drawing", spreadOn);
+        const sc = document.getElementById("spread-chart");
+        if (sc) sc.classList.toggle("drawing", spreadOn);
+      }
+
+      function setDrawMode(scope, mode) {
+        const next = drawMode[scope] === mode ? null : mode;
+        drawMode[scope] = next;
+        trendPending[scope] = null;
+        if (!next) {
+          setDrawHint(scope, "");
+        } else if (next === "h") {
+          setDrawHint(scope, "Clique no gráfico para inserir linha horizontal");
+        } else if (next === "trend") {
+          setDrawHint(scope, "Clique o 1º ponto da tendência");
+        } else if (next === "erase") {
+          setDrawHint(scope, "Clique perto de uma linha para apagar");
+        }
+        syncDrawButtons(scope);
+      }
+
+      function priceSeriesForChart(chart) {
+        if (chart === priceChart) return seriesOtc;
+        if (chart === otcChart) return seriesOtcSplit;
+        if (chart === euChart) return seriesEuSplit;
+        if (chart === spreadChart) return seriesSpread;
+        return null;
+      }
+
+      function priceDrawTargets() {
+        if (layout === "split") {
+          return [
+            { chart: otcChart, series: seriesOtcSplit },
+            { chart: euChart, series: seriesEuSplit },
+          ].filter((t) => t.chart && t.series);
+        }
+        return seriesOtc && priceChart
+          ? [{ chart: priceChart, series: seriesOtc }]
+          : [];
+      }
+
+      function clearDrawRuntime(scope) {
+        for (const item of drawRuntime[scope] || []) {
+          for (const h of item.handles || []) {
+            try {
+              if (h.priceLine && h.series && typeof h.series.removePriceLine === "function") {
+                h.series.removePriceLine(h.priceLine);
+              }
+            } catch (_) {}
+            try {
+              if (h.lineSeries && h.chart) {
+                h.chart.removeSeries(h.lineSeries);
+              }
+            } catch (_) {}
+          }
+        }
+        drawRuntime[scope] = [];
+      }
+
+      function mountHLine(scope, def) {
+        const handles = [];
+        const opts = {
+          price: def.price,
+          color: def.color,
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: formatLinePrice(def.price),
+        };
+        const targets =
+          scope === "spread"
+            ? seriesSpread && spreadChart
+              ? [{ chart: spreadChart, series: seriesSpread }]
+              : []
+            : priceDrawTargets();
+        for (const t of targets) {
+          try {
+            const pl = t.series.createPriceLine(opts);
+            handles.push({ chart: t.chart, series: t.series, priceLine: pl });
+          } catch (_) {}
+        }
+        drawRuntime[scope].push({ id: def.id, type: "h", handles });
+      }
+
+      function mountTrend(scope, def) {
+        const a = { time: def.t1, value: def.p1 };
+        const b = { time: def.t2, value: def.p2 };
+        if (a.time == null || b.time == null) return;
+        const pts = a.time <= b.time ? [a, b] : [b, a];
+        const handles = [];
+        const targets =
+          scope === "spread"
+            ? spreadChart
+              ? [{ chart: spreadChart }]
+              : []
+            : layout === "split"
+              ? [
+                  { chart: otcChart },
+                  { chart: euChart },
+                ].filter((t) => t.chart)
+              : priceChart
+                ? [{ chart: priceChart }]
+                : [];
+        for (const t of targets) {
+          try {
+            const ls = t.chart.addLineSeries({
+              color: def.color,
+              lineWidth: 2,
+              priceFormat: priceFmt(),
+              lastValueVisible: false,
+              priceLineVisible: false,
+              crosshairMarkerVisible: false,
+            });
+            ls.setData(pts);
+            handles.push({ chart: t.chart, lineSeries: ls });
+          } catch (_) {}
+        }
+        drawRuntime[scope].push({ id: def.id, type: "trend", handles });
+      }
+
+      function remountUserLines(scope) {
+        clearDrawRuntime(scope);
+        for (const def of userLines[scope] || []) {
+          if (def.type === "h") mountHLine(scope, def);
+          else if (def.type === "trend") mountTrend(scope, def);
+        }
+      }
+
+      function remountAllUserLines() {
+        remountUserLines("price");
+        remountUserLines("spread");
+      }
+
+      function addHLine(scope, price) {
+        const def = {
+          id: nextLineId++,
+          type: "h",
+          price: Number(price),
+          color: nextLineColor(scope),
+        };
+        userLines[scope].push(def);
+        saveUserLines();
+        mountHLine(scope, def);
+      }
+
+      function addTrend(scope, t1, p1, t2, p2) {
+        if (t1 === t2 && p1 === p2) return;
+        const def = {
+          id: nextLineId++,
+          type: "trend",
+          t1: t1,
+          p1: Number(p1),
+          t2: t2,
+          p2: Number(p2),
+          color: nextLineColor(scope),
+        };
+        userLines[scope].push(def);
+        saveUserLines();
+        mountTrend(scope, def);
+      }
+
+      function removeUserLine(scope, id) {
+        userLines[scope] = userLines[scope].filter((l) => l.id !== id);
+        saveUserLines();
+        remountUserLines(scope);
+      }
+
+      function clearUserLines(scope) {
+        userLines[scope] = [];
+        saveUserLines();
+        trendPending[scope] = null;
+        clearDrawRuntime(scope);
+        const mode = drawMode[scope];
+        if (mode === "h") {
+          setDrawHint(scope, "Linhas limpas · clique para inserir linha horizontal");
+        } else if (mode === "trend") {
+          setDrawHint(scope, "Linhas limpas · clique o 1º ponto da tendência");
+        } else if (mode === "erase") {
+          setDrawHint(scope, "Linhas limpas");
+        } else {
+          setDrawHint(scope, "Linhas limpas");
+          setTimeout(() => setDrawHint(scope, ""), 900);
+        }
+      }
+
+      function visiblePriceSpan(series) {
+        try {
+          const top = series.coordinateToPrice(0);
+          const bot = series.coordinateToPrice(200);
+          if (top == null || bot == null) return 0.0005;
+          return Math.max(Math.abs(top - bot), 1e-8);
+        } catch (_) {
+          return 0.0005;
+        }
+      }
+
+      function eraseNearest(scope, chart, series, time, price, point) {
+        const lines = userLines[scope] || [];
+        if (!lines.length) return;
+        const span = visiblePriceSpan(series);
+        const priceTol = span * 0.03;
+        let bestId = null;
+        let bestScore = Infinity;
+
+        for (const def of lines) {
+          if (def.type === "h") {
+            const d = Math.abs(def.price - price);
+            if (d <= priceTol && d < bestScore) {
+              bestScore = d;
+              bestId = def.id;
+            }
+            continue;
+          }
+          if (def.type === "trend" && time != null) {
+            const tMin = Math.min(def.t1, def.t2);
+            const tMax = Math.max(def.t1, def.t2);
+            if (time < tMin - 3600 || time > tMax + 3600) continue;
+            const spanT = tMax - tMin || 1;
+            const u = Math.max(0, Math.min(1, (time - tMin) / spanT));
+            const pAt =
+              def.t1 <= def.t2
+                ? def.p1 + (def.p2 - def.p1) * u
+                : def.p2 + (def.p1 - def.p2) * u;
+            const d = Math.abs(pAt - price);
+            if (d <= priceTol * 1.5 && d < bestScore) {
+              bestScore = d;
+              bestId = def.id;
+            }
+          }
+        }
+
+        if (bestId == null && point && typeof series.priceToCoordinate === "function") {
+          // fallback: distancia em pixels na vertical
+          let bestPx = 14;
+          for (const def of lines) {
+            if (def.type !== "h") continue;
+            try {
+              const y = series.priceToCoordinate(def.price);
+              if (y == null) continue;
+              const d = Math.abs(y - point.y);
+              if (d < bestPx) {
+                bestPx = d;
+                bestId = def.id;
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (bestId != null) removeUserLine(scope, bestId);
+      }
+
+      function resolveClickTime(chart, param) {
+        if (param && param.time != null) {
+          return typeof param.time === "object" ? null : param.time;
+        }
+        if (!param || !param.point) return null;
+        try {
+          const t = chart.timeScale().coordinateToTime(param.point.x);
+          return typeof t === "number" ? t : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function onDrawClick(scope, chart, param) {
+        const mode = drawMode[scope];
+        if (!mode || !param || !param.point) return;
+        const series = priceSeriesForChart(chart);
+        if (!series || typeof series.coordinateToPrice !== "function") return;
+        let price = null;
+        try {
+          price = series.coordinateToPrice(param.point.y);
+        } catch (_) {
+          price = null;
+        }
+        if (price == null || !Number.isFinite(price)) return;
+        const time = resolveClickTime(chart, param);
+
+        if (mode === "h") {
+          addHLine(scope, price);
+          return;
+        }
+        if (mode === "trend") {
+          if (time == null) {
+            setDrawHint(scope, "Clique sobre a área com dados (eixo do tempo)");
+            return;
+          }
+          if (!trendPending[scope]) {
+            trendPending[scope] = { time, price };
+            setDrawHint(scope, "Clique o 2º ponto da tendência");
+          } else {
+            const first = trendPending[scope];
+            trendPending[scope] = null;
+            addTrend(scope, first.time, first.price, time, price);
+            setDrawHint(scope, "Tendência adicionada · clique para outra ou desligue o modo");
+          }
+          return;
+        }
+        if (mode === "erase") {
+          eraseNearest(scope, chart, series, time, price, param.point);
+        }
+      }
+
+      function bindDrawClicks() {
+        const pairs = [
+          { chart: priceChart, scope: "price" },
+          { chart: otcChart, scope: "price" },
+          { chart: euChart, scope: "price" },
+          { chart: spreadChart, scope: "spread" },
+        ];
+        for (const p of pairs) {
+          if (!p.chart) continue;
+          if (drawClickBound && drawClickBound.has(p.chart)) continue;
+          if (drawClickBound) drawClickBound.add(p.chart);
+          p.chart.subscribeClick((param) => onDrawClick(p.scope, p.chart, param));
+        }
+        updateDrawCursor();
       }
 
       function ensureCharts() {
@@ -583,6 +1011,7 @@
         }
         bindChartLink();
         bindRangePersistence();
+        bindDrawClicks();
         return true;
       }
 
@@ -833,6 +1262,7 @@
           } finally {
             restoringRange = false;
           }
+          remountUserLines("price");
           resizeAll();
           applyVisibleRangeOrFit();
         }
@@ -932,6 +1362,12 @@
 
         resizeAll();
         applyVisibleRangeOrFit();
+        if (
+          (!drawRuntime.price.length && userLines.price.length) ||
+          (!drawRuntime.spread.length && userLines.spread.length)
+        ) {
+          remountAllUserLines();
+        }
         requestAnimationFrame(() => {
           resizeAll();
           applyVisibleRangeOrFit();
@@ -997,6 +1433,20 @@
       if (btnOpens) {
         btnOpens.addEventListener("click", () => setOpensOn(!showOpens));
       }
+      function wireDrawControls(scope) {
+        const prefix = scope === "spread" ? "spread" : "price";
+        const btnH = document.getElementById("btn-draw-" + prefix + "-h");
+        const btnT = document.getElementById("btn-draw-" + prefix + "-trend");
+        const btnE = document.getElementById("btn-draw-" + prefix + "-erase");
+        const btnC = document.getElementById("btn-draw-" + prefix + "-clear");
+        if (btnH) btnH.addEventListener("click", () => setDrawMode(scope, "h"));
+        if (btnT) btnT.addEventListener("click", () => setDrawMode(scope, "trend"));
+        if (btnE) btnE.addEventListener("click", () => setDrawMode(scope, "erase"));
+        if (btnC) btnC.addEventListener("click", () => clearUserLines(scope));
+        syncDrawButtons(scope);
+      }
+      wireDrawControls("price");
+      wireDrawControls("spread");
       syncOverlayButtons();
       syncPriceStyleButton();
 
