@@ -25,7 +25,7 @@ from bot.ohlc_store import (
     stored_summary,
 )
 from bot.runner import MIN_DURATION, normalize_asset, runner
-from bot.spread_ou import analyze_spread_ou
+from bot.spread_ou import analyze_spread_ou, evaluate_paper_signal
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -635,9 +635,12 @@ def ohlc_spread_ou(
     paired_only: bool = True,
     min_n: int = 48,
     limit: int = 0,
+    payout: float = 0.92,
+    z_min: float = 1.5,
+    edge_margin: float = 0.03,
     _: None = Depends(require_token),
 ) -> dict:
-    """Fase 1: AR(1)/OU no spread — theta, half-life, z, p̂ 1h/2h/4h."""
+    """Fase 1+2: OU no spread + sinal paper GO/SKIP (binaria <=4h)."""
     try:
         payload = _load_spread_bundle(otc_asset, eurusd_asset, limit)
     except RuntimeError as exc:
@@ -649,6 +652,12 @@ def ohlc_spread_ou(
         paired_only=paired_only,
         min_n=max(20, min(min_n, 5000)),
     )
+    signal = evaluate_paper_signal(
+        analysis,
+        payout=payout,
+        z_min=z_min,
+        edge_margin=edge_margin,
+    )
     return {
         "timeframe": "1h",
         "otc_asset": payload["otc_asset"],
@@ -656,6 +665,7 @@ def ohlc_spread_ou(
         "eurusd_source": payload["eurusd_source"],
         "spread_count": len(payload["spread"]),
         "ou": analysis,
+        "signal": signal,
     }
 
 
