@@ -172,6 +172,8 @@
               <button type="button" class="btn btn-mode active" id="btn-overlay">Overlay</button>
               <button type="button" class="btn btn-mode" id="btn-split">Separar</button>
               <button type="button" class="btn btn-mode" id="btn-link">Link off</button>
+              <button type="button" class="btn btn-mode active" id="btn-price-style">Candles</button>
+              <button type="button" class="btn btn-mode" id="btn-fit">Enquadrar</button>
             </div>
             <div class="legend">
               <span class="lg-otc">EURUSD_otc (Pocket)</span>
@@ -214,6 +216,8 @@
       const LINK_KEY = "iq_blitz_spread_link";
       const AFTER_HOURS_KEY = "iq_blitz_spread_after_hours";
       const OPENS_KEY = "iq_blitz_spread_opens";
+      const PRICE_STYLE_KEY = "iq_blitz_spread_price_style";
+      const RANGE_KEY = "iq_blitz_spread_visible_range";
 
       function getToken() {
         return localStorage.getItem(TOKEN_KEY) || "";
@@ -250,6 +254,8 @@
       const btnOverlay = document.getElementById("btn-overlay");
       const btnSplit = document.getElementById("btn-split");
       const btnLink = document.getElementById("btn-link");
+      const btnPriceStyle = document.getElementById("btn-price-style");
+      const btnFit = document.getElementById("btn-fit");
       const btnAfterHours = document.getElementById("btn-after-hours");
       const btnOpens = document.getElementById("btn-opens");
       const overlayWrap = document.getElementById("overlay-wrap");
@@ -257,9 +263,19 @@
 
       let layout = localStorage.getItem(LAYOUT_KEY) || "overlay";
       let linkOn = localStorage.getItem(LINK_KEY) === "1";
-      // Default ON se a chave ainda nao existe.
       let showAfterHours = localStorage.getItem(AFTER_HOURS_KEY) !== "0";
       let showOpens = localStorage.getItem(OPENS_KEY) !== "0";
+      let priceStyle = localStorage.getItem(PRICE_STYLE_KEY) === "line" ? "line" : "candle";
+      let savedTimeRange = null;
+      try {
+        const rawRange = localStorage.getItem(RANGE_KEY);
+        if (rawRange) savedTimeRange = JSON.parse(rawRange);
+      } catch (_) {
+        savedTimeRange = null;
+      }
+      let userAdjustedView = !!savedTimeRange;
+      let restoringRange = false;
+      const rangeBoundCharts = typeof WeakSet !== "undefined" ? new WeakSet() : null;
       let priceChart = null;
       let otcChart = null;
       let euChart = null;
@@ -279,8 +295,7 @@
       let syncingCharts = false;
       let lastOtcCandles = [];
       let lastEuCandles = [];
-      let lastSpreadPoints = [];
-      function showAuth(err) {
+      let lastSpreadPoints = [];      function showAuth(err) {
         authBox.hidden = false;
         appBox.hidden = true;
         if (err) {
@@ -337,7 +352,20 @@
         };
       }
 
-      function candleSeries(chart, up, down) {
+      function priceFmt() {
+        return { type: "price", precision: 5, minMove: 0.00001 };
+      }
+
+      function addPriceSeries(chart, up, down) {
+        if (priceStyle === "line") {
+          return chart.addLineSeries({
+            color: up,
+            lineWidth: 2,
+            priceFormat: priceFmt(),
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+        }
         return chart.addCandlestickSeries({
           upColor: up,
           downColor: down,
@@ -345,8 +373,158 @@
           borderDownColor: down,
           wickUpColor: up,
           wickDownColor: down,
-          priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          priceFormat: priceFmt(),
         });
+      }
+
+      function toLineData(candles) {
+        return (candles || []).map((c) => ({ time: c.time, value: c.close }));
+      }
+
+      function priceData(candles) {
+        return priceStyle === "line" ? toLineData(candles) : candles || [];
+      }
+
+      function removeSeriesSafe(chart, series) {
+        if (!chart || !series) return;
+        try {
+          chart.removeSeries(series);
+        } catch (_) {}
+      }
+
+      function applyPriceData() {
+        if (seriesOtc) seriesOtc.setData(priceData(lastOtcCandles));
+        if (seriesEu) seriesEu.setData(priceData(lastEuCandles));
+        if (seriesOtcSplit) seriesOtcSplit.setData(priceData(lastOtcCandles));
+        if (seriesEuSplit) seriesEuSplit.setData(priceData(lastEuCandles));
+      }
+
+      function recreatePriceSeries() {
+        restoringRange = true;
+        try {
+          if (priceChart) {
+            removeSeriesSafe(priceChart, seriesOtc);
+            removeSeriesSafe(priceChart, seriesEu);
+            seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
+            seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
+          }
+          if (otcChart) {
+            removeSeriesSafe(otcChart, seriesOtcSplit);
+            seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
+          }
+          if (euChart) {
+            removeSeriesSafe(euChart, seriesEuSplit);
+            seriesEuSplit = addPriceSeries(euChart, "#fbbf24", "#d97706");
+          }
+          applyPriceData();
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function primaryTimeChart() {
+        if (layout === "overlay" && priceChart) return priceChart;
+        if (layout === "split" && otcChart) return otcChart;
+        return priceChart || spreadChart;
+      }
+
+      function captureVisibleRange() {
+        if (restoringRange) return;
+        const chart = primaryTimeChart();
+        if (!chart) return;
+        try {
+          const r = chart.timeScale().getVisibleRange();
+          if (r && r.from != null && r.to != null) {
+            savedTimeRange = { from: r.from, to: r.to };
+            userAdjustedView = true;
+            localStorage.setItem(RANGE_KEY, JSON.stringify(savedTimeRange));
+          }
+        } catch (_) {}
+      }
+
+      function restoreVisibleRange() {
+        if (!savedTimeRange || savedTimeRange.from == null || savedTimeRange.to == null) {
+          return false;
+        }
+        restoringRange = true;
+        let ok = false;
+        try {
+          for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+            if (!c) continue;
+            try {
+              c.timeScale().setVisibleRange(savedTimeRange);
+              ok = true;
+            } catch (_) {}
+          }
+          if (ok) drawEurusdOpenLines();
+          return ok;
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function fitAll(resetSaved) {
+        restoringRange = true;
+        try {
+          for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+            if (!c) continue;
+            try {
+              c.timeScale().fitContent();
+            } catch (_) {}
+          }
+          if (resetSaved) {
+            userAdjustedView = false;
+            savedTimeRange = null;
+            try {
+              localStorage.removeItem(RANGE_KEY);
+            } catch (_) {}
+          }
+          drawEurusdOpenLines();
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function applyVisibleRangeOrFit() {
+        if (userAdjustedView && restoreVisibleRange()) return;
+        fitAll(false);
+      }
+
+      function bindRangePersistence() {
+        for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+          if (!c) continue;
+          if (rangeBoundCharts && rangeBoundCharts.has(c)) continue;
+          if (rangeBoundCharts) rangeBoundCharts.add(c);
+          const onChange = () => {
+            if (restoringRange) return;
+            captureVisibleRange();
+          };
+          try {
+            if (typeof c.timeScale().subscribeVisibleTimeRangeChange === "function") {
+              c.timeScale().subscribeVisibleTimeRangeChange(onChange);
+            } else {
+              c.timeScale().subscribeVisibleLogicalRangeChange(onChange);
+            }
+          } catch (_) {
+            try {
+              c.timeScale().subscribeVisibleLogicalRangeChange(onChange);
+            } catch (__) {}
+          }
+        }
+      }
+
+      function syncPriceStyleButton() {
+        if (!btnPriceStyle) return;
+        btnPriceStyle.classList.add("active");
+        btnPriceStyle.textContent = priceStyle === "line" ? "Linha" : "Candles";
+      }
+
+      function setPriceStyle(style) {
+        priceStyle = style === "line" ? "line" : "candle";
+        localStorage.setItem(PRICE_STYLE_KEY, priceStyle);
+        syncPriceStyleButton();
+        recreatePriceSeries();
+        applyVisibleRangeOrFit();
       }
 
       function ensureCharts() {
@@ -355,22 +533,22 @@
           const el = document.getElementById("price-chart");
           if (!el) return false;
           priceChart = LightweightCharts.createChart(el, chartOpts(el));
-          seriesOtc = candleSeries(priceChart, "#22d3ee", "#0891b2");
-          seriesEu = candleSeries(priceChart, "#fbbf24", "#d97706");
+          seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
+          seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
         }
         if (layout === "split") {
           if (!otcChart) {
             const el = document.getElementById("otc-chart");
             if (el) {
               otcChart = LightweightCharts.createChart(el, chartOpts(el));
-              seriesOtcSplit = candleSeries(otcChart, "#22d3ee", "#0891b2");
+              seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
             }
           }
           if (!euChart) {
             const el = document.getElementById("eu-chart");
             if (el) {
               euChart = LightweightCharts.createChart(el, chartOpts(el));
-              seriesEuSplit = candleSeries(euChart, "#fbbf24", "#d97706");
+              seriesEuSplit = addPriceSeries(euChart, "#fbbf24", "#d97706");
             }
           }
         }
@@ -381,7 +559,7 @@
           seriesSpread = spreadChart.addLineSeries({
             color: "#a78bfa",
             lineWidth: 2,
-            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            priceFormat: priceFmt(),
             lastValueVisible: true,
             priceLineVisible: false,
           });
@@ -389,7 +567,7 @@
             color: "#f43f5e",
             lineWidth: 2,
             lineStyle: 2,
-            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            priceFormat: priceFmt(),
             lastValueVisible: false,
             priceLineVisible: false,
           });
@@ -404,6 +582,7 @@
           bindOpenLines();
         }
         bindChartLink();
+        bindRangePersistence();
         return true;
       }
 
@@ -634,11 +813,10 @@
         overlayWrap.classList.toggle("visible", layout === "overlay");
         splitWrap.classList.toggle("visible", layout === "split");
         syncLinkButton();
+        syncPriceStyleButton();
         requestAnimationFrame(() => {
           resizeAll();
-          if (priceChart) priceChart.timeScale().fitContent();
-          if (otcChart) otcChart.timeScale().fitContent();
-          if (euChart) euChart.timeScale().fitContent();
+          applyVisibleRangeOrFit();
         });
       }
 
@@ -649,9 +827,14 @@
         // Recria series split se necessario e reaplica dados.
         if (lastOtcCandles.length || lastEuCandles.length || lastSpreadPoints.length) {
           ensureCharts();
-          if (seriesOtcSplit) seriesOtcSplit.setData(lastOtcCandles);
-          if (seriesEuSplit) seriesEuSplit.setData(lastEuCandles);
+          restoringRange = true;
+          try {
+            applyPriceData();
+          } finally {
+            restoringRange = false;
+          }
           resizeAll();
+          applyVisibleRangeOrFit();
         }
       }
 
@@ -663,102 +846,95 @@
         }
         const otc = toCandle(data.otc);
         const eu = toCandle(data.eurusd);
-        seriesOtc.setData(otc);
-        seriesEu.setData(eu);
-        if (seriesOtcSplit) seriesOtcSplit.setData(otc);
-        if (seriesEuSplit) seriesEuSplit.setData(eu);
         lastOtcCandles = otc;
         lastEuCandles = eu;
 
-        const weekend = [];
-        for (const p of data.spread || []) {
-          const pt = { time: p.time, value: p.spread };
-          if (p.after_hours || p.weekend || p.mode === "carry") weekend.push(pt);
-        }
-        const allSpread = (data.spread || []).map((p) => ({
-          time: p.time,
-          value: p.spread,
-        }));
-        seriesSpread.setData(allSpread);
-        lastWeekendPoints = weekend;
-        lastSpreadPoints = allSpread;
+        restoringRange = true;
+        try {
+          applyPriceData();
 
-        eurusdOpens = (data.eurusd_opens || []).map((o) => ({
-          time: o.time,
-        }));
-        // Markers so podem existir em timestamps presentes na serie (senao LWC quebra).
-        const spreadTimeSet = new Set(allSpread.map((p) => p.time));
-        const markers = [];
-        for (const o of eurusdOpens) {
-          let t = o.time;
-          if (!spreadTimeSet.has(t)) {
-            // snap para o ponto de spread mais proximo
-            let best = null;
-            let bestDist = Infinity;
-            for (const p of allSpread) {
-              const d = Math.abs(p.time - t);
-              if (d < bestDist) {
-                bestDist = d;
-                best = p.time;
-              }
-            }
-            if (best == null || bestDist > 3600 * 6) continue;
-            t = best;
+          const weekend = [];
+          for (const p of data.spread || []) {
+            const pt = { time: p.time, value: p.spread };
+            if (p.after_hours || p.weekend || p.mode === "carry") weekend.push(pt);
           }
-          markers.push({
-            time: t,
-            position: "aboveBar",
-            color: "#22d3ee",
-            shape: "arrowDown",
-            text: "Open",
-          });
+          const allSpread = (data.spread || []).map((p) => ({
+            time: p.time,
+            value: p.spread,
+          }));
+          seriesSpread.setData(allSpread);
+          lastWeekendPoints = weekend;
+          lastSpreadPoints = allSpread;
+
+          eurusdOpens = (data.eurusd_opens || []).map((o) => ({
+            time: o.time,
+          }));
+          // Markers so podem existir em timestamps presentes na serie (senao LWC quebra).
+          const spreadTimeSet = new Set(allSpread.map((p) => p.time));
+          const markers = [];
+          for (const o of eurusdOpens) {
+            let t = o.time;
+            if (!spreadTimeSet.has(t)) {
+              // snap para o ponto de spread mais proximo
+              let best = null;
+              let bestDist = Infinity;
+              for (const p of allSpread) {
+                const d = Math.abs(p.time - t);
+                if (d < bestDist) {
+                  bestDist = d;
+                  best = p.time;
+                }
+              }
+              if (best == null || bestDist > 3600 * 6) continue;
+              t = best;
+            }
+            markers.push({
+              time: t,
+              position: "aboveBar",
+              color: "#22d3ee",
+              shape: "arrowDown",
+              text: "Open",
+            });
+          }
+          lastOpenMarkers = markers;
+          applySpreadOverlays();
+          lastMeta =
+            (data.otc_asset || "OTC") +
+            " · " +
+            otc.length +
+            " velas · " +
+            (data.eurusd_asset || "EURUSD") +
+            " [" +
+            (data.eurusd_source || "?") +
+            "] · " +
+            eu.length +
+            " velas · spread " +
+            allSpread.length +
+            " (" +
+            (data.after_hours_points != null
+              ? data.after_hours_points
+              : data.weekend_points || 0) +
+            " fora do horário · " +
+            eurusdOpens.length +
+            " aberturas)";
+          document.getElementById("chart-meta").textContent = lastMeta;
+          document.getElementById("s-spread").textContent = String(allSpread.length);
+          document.getElementById("s-wknd").textContent = String(
+            data.after_hours_points != null
+              ? data.after_hours_points
+              : data.weekend_points || 0
+          );
+          const opensEl = document.getElementById("s-opens");
+          if (opensEl) opensEl.textContent = String(eurusdOpens.length);
+        } finally {
+          restoringRange = false;
         }
-        lastOpenMarkers = markers;
-        applySpreadOverlays();
-        lastMeta =
-          (data.otc_asset || "OTC") +
-          " · " +
-          otc.length +
-          " velas · " +
-          (data.eurusd_asset || "EURUSD") +
-          " [" +
-          (data.eurusd_source || "?") +
-          "] · " +
-          eu.length +
-          " velas · spread " +
-          allSpread.length +
-          " (" +
-          (data.after_hours_points != null
-            ? data.after_hours_points
-            : data.weekend_points || 0) +
-          " fora do horário · " +
-          eurusdOpens.length +
-          " aberturas)";
-        document.getElementById("chart-meta").textContent = lastMeta;
-        document.getElementById("s-spread").textContent = String(allSpread.length);
-        document.getElementById("s-wknd").textContent = String(
-          data.after_hours_points != null
-            ? data.after_hours_points
-            : data.weekend_points || 0
-        );
-        const opensEl = document.getElementById("s-opens");
-        if (opensEl) opensEl.textContent = String(eurusdOpens.length);
 
         resizeAll();
-        try {
-          priceChart.timeScale().fitContent();
-        } catch (_) {}
-        try {
-          if (otcChart) otcChart.timeScale().fitContent();
-        } catch (_) {}
-        try {
-          if (euChart) euChart.timeScale().fitContent();
-        } catch (_) {}
-        try {
-          spreadChart.timeScale().fitContent();
-        } catch (_) {}
+        applyVisibleRangeOrFit();
         requestAnimationFrame(() => {
           resizeAll();
+          applyVisibleRangeOrFit();
           drawEurusdOpenLines();
         });
       }
@@ -805,6 +981,14 @@
       btnOverlay.addEventListener("click", () => setLayout("overlay"));
       btnSplit.addEventListener("click", () => setLayout("split"));
       if (btnLink) btnLink.addEventListener("click", () => setLinkOn(!linkOn));
+      if (btnPriceStyle) {
+        btnPriceStyle.addEventListener("click", () =>
+          setPriceStyle(priceStyle === "line" ? "candle" : "line")
+        );
+      }
+      if (btnFit) {
+        btnFit.addEventListener("click", () => fitAll(true));
+      }
       if (btnAfterHours) {
         btnAfterHours.addEventListener("click", () =>
           setAfterHoursOn(!showAfterHours)
@@ -814,6 +998,7 @@
         btnOpens.addEventListener("click", () => setOpensOn(!showOpens));
       }
       syncOverlayButtons();
+      syncPriceStyleButton();
 
       document.getElementById("token-save").addEventListener("click", async () => {
         setToken(document.getElementById("token-input").value.trim());
