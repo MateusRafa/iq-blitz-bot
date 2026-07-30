@@ -178,6 +178,37 @@
             <p class="message" id="s-msg"></p>
           </div>
 
+          <div class="panel" id="ou-panel">
+            <h2>Modelo OU / AR(1) — Fase 1</h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Estimativa no spread <code>OTC − EURUSD</code> (pontos
+              <strong>paired</strong> por padrão). Horizontes alinhados ao
+              expiry máximo da Pocket (1h / 2h / 4h). O vies CALL/PUT na OTC
+              é sugerido pela reversão do spread — ainda sem auto-ordem.
+            </p>
+            <div class="status-grid" id="ou-grid">
+              <div class="status-item"><span class="label">Pontos</span><span class="value" id="ou-n">—</span></div>
+              <div class="status-item"><span class="label">Mean-reverting</span><span class="value" id="ou-mr">—</span></div>
+              <div class="status-item"><span class="label">θ (theta)</span><span class="value" id="ou-theta">—</span></div>
+              <div class="status-item"><span class="label">Half-life</span><span class="value" id="ou-hl">—</span></div>
+              <div class="status-item"><span class="label">σ eq</span><span class="value" id="ou-sig">—</span></div>
+              <div class="status-item"><span class="label">z atual</span><span class="value" id="ou-z">—</span></div>
+              <div class="status-item"><span class="label">Spread agora</span><span class="value" id="ou-x">—</span></div>
+              <div class="status-item"><span class="label">φ (AR1)</span><span class="value" id="ou-phi">—</span></div>
+            </div>
+            <div class="status-grid" style="margin-top:0.65rem">
+              <div class="status-item"><span class="label">p̂ 1h</span><span class="value" id="ou-p1">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 1h</span><span class="value" id="ou-pay1">—</span></div>
+              <div class="status-item"><span class="label">p̂ 2h</span><span class="value" id="ou-p2">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 2h</span><span class="value" id="ou-pay2">—</span></div>
+              <div class="status-item"><span class="label">p̂ 4h</span><span class="value" id="ou-p4">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 4h</span><span class="value" id="ou-pay4">—</span></div>
+              <div class="status-item"><span class="label">Vies OTC</span><span class="value" id="ou-bias">—</span></div>
+              <div class="status-item"><span class="label">Melhor T</span><span class="value" id="ou-best">—</span></div>
+            </div>
+            <p class="message" id="ou-msg"></p>
+          </div>
+
           <div class="panel">
             <h2>Preços 1h</h2>
             <div class="chart-modes" role="group" aria-label="Layout">
@@ -1399,6 +1430,120 @@
       async function loadCharts() {
         const data = await api("/api/ohlc-spread/series?limit=0");
         applySeries(data);
+        try {
+          await loadOu();
+        } catch (e) {
+          const el = document.getElementById("ou-msg");
+          if (el) el.textContent = "Erro OU: " + (e.message || e);
+        }
+      }
+
+      function fmtNum(v, digits) {
+        if (v == null || !Number.isFinite(Number(v))) return "—";
+        return Number(v).toFixed(digits);
+      }
+
+      function fmtPct(v) {
+        if (v == null || !Number.isFinite(Number(v))) return "—";
+        return (Number(v) * 100).toFixed(1) + "%";
+      }
+
+      function renderOu(payload) {
+        const ou = (payload && payload.ou) || {};
+        const set = (id, text) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = text;
+        };
+        if (!ou.ok) {
+          set("ou-n", ou.n != null ? String(ou.n) : "—");
+          set("ou-mr", "não");
+          set("ou-theta", "—");
+          set("ou-hl", "—");
+          set("ou-sig", "—");
+          set("ou-z", "—");
+          set("ou-x", "—");
+          set("ou-phi", "—");
+          set("ou-p1", "—");
+          set("ou-p2", "—");
+          set("ou-p4", "—");
+          set("ou-pay1", "—");
+          set("ou-pay2", "—");
+          set("ou-pay4", "—");
+          set("ou-bias", "—");
+          set("ou-best", "—");
+          set(
+            "ou-msg",
+            ou.error ||
+              "Sem estimativa OU (preciso de mais pontos paired no spread)."
+          );
+          return;
+        }
+        set("ou-n", String(ou.n ?? "—"));
+        set("ou-mr", ou.mean_reverting ? "sim" : "não");
+        set("ou-theta", fmtNum(ou.theta, 6));
+        set(
+          "ou-hl",
+          ou.half_life_hours != null
+            ? fmtNum(ou.half_life_hours, 2) + " h"
+            : "—"
+        );
+        set("ou-sig", fmtNum(ou.sigma_eq, 6));
+        set("ou-z", fmtNum(ou.z, 2));
+        set("ou-x", fmtNum(ou.x_last, 6));
+        set("ou-phi", fmtNum(ou.phi, 4));
+
+        const h1 = (ou.horizons && ou.horizons["1h"]) || {};
+        const h2 = (ou.horizons && ou.horizons["2h"]) || {};
+        const h4 = (ou.horizons && ou.horizons["4h"]) || {};
+        set("ou-p1", fmtPct(h1.p_reversion));
+        set("ou-p2", fmtPct(h2.p_reversion));
+        set("ou-p4", fmtPct(h4.p_reversion));
+        set(
+          "ou-pay1",
+          h1.min_payout != null ? fmtPct(h1.min_payout) : "—"
+        );
+        set(
+          "ou-pay2",
+          h2.min_payout != null ? fmtPct(h2.min_payout) : "—"
+        );
+        set(
+          "ou-pay4",
+          h4.min_payout != null ? fmtPct(h4.min_payout) : "—"
+        );
+
+        const best = ou.best || null;
+        if (best) {
+          const bias = String(best.otc_bias || "—").toUpperCase();
+          set("ou-bias", bias + " · spread " + (best.side_spread || "—"));
+          set(
+            "ou-best",
+            (best.horizon || "—") + " · " + fmtPct(best.p_reversion)
+          );
+        } else {
+          set("ou-bias", "—");
+          set("ou-best", "—");
+        }
+
+        let msg =
+          "Filtro: " +
+          (ou.filter || "paired") +
+          " · fonte EURUSD: " +
+          (payload.eurusd_source || "?");
+        if (!ou.mean_reverting) {
+          msg +=
+            " · φ fora (0,1): sem mean-reversion confiável — não use p̂ para edge.";
+        } else if (ou.z != null && Math.abs(ou.z) < 1) {
+          msg += " · |z| baixo: spread perto de θ — sinal fraco.";
+        } else if (best && best.p_reversion != null) {
+          msg +=
+            " · compare p̂ com o payout da Pocket (precisa p̂ > 1/(1+payout)).";
+        }
+        set("ou-msg", msg);
+      }
+
+      async function loadOu() {
+        const data = await api("/api/ohlc-spread/ou?paired_only=true&min_n=48");
+        renderOu(data);
       }
 
       async function refresh() {
