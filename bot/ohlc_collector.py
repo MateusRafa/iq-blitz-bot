@@ -15,6 +15,7 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 
 from bot.ohlc_store import (
     last_opened_at,
+    oldest_opened_at,
     stored_summary,
     supabase_ok,
     upsert_candles,
@@ -292,6 +293,102 @@ class OhlcCollector:
             self._close_client(client)
         st = self.status()
         st["pull"] = {"upserted": upserted, "asset": target}
+        return st
+
+    def pull_history(
+        self,
+        asset: str | None = None,
+        *,
+        days: int = 45,
+    ) -> dict[str, Any]:
+        """Backfill profundo: pede N dias a Pocket e grava TODAS as velas.
+
+        Diferente de pull_now (incremental a partir do ultimo salvo), isto
+        nao descarta candles antigas — cobre buracos antes do primeiro dia
+        que ja temos no Supabase (ex.: UI Pocket mostra 08/07 e so temos 20/07).
+        """
+        ok, msg = supabase_ok()
+        if not ok:
+            raise RuntimeError(msg)
+        ndays = max(1, min(int(days), 120))
+        offset = ndays * 86400 + TIMEFRAMES["1h"] * 3
+        client: PocketOption | None = None
+        target = normalize_asset(asset) if asset else self._asset
+        upserted = 0
+        fetched = 0
+        oldest = None
+        newest = None
+        try:
+            self._set(
+                phase="history_pull",
+                message=f"Historico OTC Pocket ~{ndays}d ({target})…",
+                error=None,
+                next_fetch_at=None,
+            )
+            client = self._connect()
+            rows = self._fetch_tf(client, target, "1h", offset)
+            fetched = len(rows)
+            if rows:
+                times = []
+                for row in rows:
+                    try:
+                        ts = datetime.fromisoformat(
+                            str(row["opened_at"]).replace("Z", "+00:00")
+                        )
+                        times.append(ts)
+                    except ValueError:
+                        continue
+                if times:
+                    oldest = min(times).isoformat()
+                    newest = max(times).isoformat()
+                # Grava tudo (upsert idempotente) — nao filtra pelo ultimo salvo.
+                upserted = upsert_candles(rows)
+            was_running = self.is_running()
+            self._set(
+                phase="waiting" if was_running else "idle",
+                message=(
+                    f"Historico OTC ok: {upserted}/{fetched} velas "
+                    f"({oldest or '?'} → {newest or '?'})"
+                ),
+            )
+            with self._lock:
+                prev = int(self._snap["per_tf"].get("1h", {}).get("ok", 0) or 0)
+                self._snap["per_tf"]["1h"] = {
+                    "ok": prev + upserted,
+                    "err": None,
+                }
+                self._snap["last_upsert"] = upserted
+                self._snap["total_upserted"] = int(
+                    self._snap.get("total_upserted", 0) or 0
+                ) + upserted
+                self._refresh_stored()
+        except Exception as exc:  # noqa: BLE001
+            self._set(
+                phase="error" if not self.is_running() else "waiting",
+                error=str(exc),
+                message=f"Historico OTC falhou: {exc}",
+            )
+            raise
+        finally:
+            self._close_client(client)
+        st = self.status()
+        st["pull"] = {
+            "mode": "history",
+            "upserted": upserted,
+            "fetched": fetched,
+            "days": ndays,
+            "offset_sec": offset,
+            "asset": target,
+            "oldest": oldest,
+            "newest": newest,
+            "stored_oldest": None,
+        }
+        try:
+            old = oldest_opened_at(target, "1h")
+            if old is not None:
+                st["pull"]["stored_oldest"] = old.isoformat()
+        except Exception:  # noqa: BLE001
+            pass
         return st
 
     def _set(self, **kwargs: Any) -> None:
