@@ -25,6 +25,7 @@ from bot.ohlc_store import (
     stored_summary,
 )
 from bot.runner import MIN_DURATION, normalize_asset, runner
+from bot.spread_ou import analyze_spread_ou
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -602,6 +603,84 @@ def ohlc_spread_series(
     _: None = Depends(require_token),
 ) -> dict:
     """Candles OTC + EURUSD + serie de spread (carry apos fechamento EURUSD)."""
+    try:
+        payload = _load_spread_bundle(otc_asset, eurusd_asset, limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    weekend_n = sum(1 for p in payload["spread"] if p.get("weekend"))
+    after_hours_n = sum(1 for p in payload["spread"] if p.get("after_hours"))
+    return {
+        "timeframe": "1h",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "otc_count": len(payload["otc"]),
+        "eurusd_count": len(payload["eurusd"]),
+        "spread_count": len(payload["spread"]),
+        "weekend_points": weekend_n,
+        "after_hours_points": after_hours_n,
+        "eurusd_opens": payload["eurusd_opens"],
+        "otc": payload["otc"],
+        "eurusd": payload["eurusd"],
+        "spread": payload["spread"],
+    }
+
+
+@app.get("/api/ohlc-spread/ou")
+def ohlc_spread_ou(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    paired_only: bool = True,
+    min_n: int = 48,
+    limit: int = 0,
+    _: None = Depends(require_token),
+) -> dict:
+    """Fase 1: AR(1)/OU no spread — theta, half-life, z, p̂ 1h/2h/4h."""
+    try:
+        payload = _load_spread_bundle(otc_asset, eurusd_asset, limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    analysis = analyze_spread_ou(
+        payload["spread"],
+        paired_only=paired_only,
+        min_n=max(20, min(min_n, 5000)),
+    )
+    return {
+        "timeframe": "1h",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "spread_count": len(payload["spread"]),
+        "ou": analysis,
+    }
+
+
+def _prefer_eurusd_rows(eu_rows: list) -> tuple[list, str]:
+    dukas = [
+        r for r in eu_rows if str(r.get("source") or "").lower() == "dukascopy"
+    ]
+    unknown = [r for r in eu_rows if not str(r.get("source") or "").strip()]
+    pocket_eu = [
+        r for r in eu_rows if str(r.get("source") or "").lower() == "pocket"
+    ]
+    if dukas:
+        return dukas, "dukascopy"
+    if unknown and not pocket_eu:
+        return unknown, "legacy"
+    if pocket_eu:
+        return pocket_eu, "pocket"
+    return eu_rows, "unknown"
+
+
+def _load_spread_bundle(
+    otc_asset: str | None,
+    eurusd_asset: str | None,
+    limit: int,
+) -> dict:
     otc_a = normalize_asset(
         otc_asset
         or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
@@ -613,57 +692,22 @@ def ohlc_spread_series(
         or collector_eurusd.status().get("asset")
         or "EURUSD"
     )
-    try:
-        otc_rows = fetch_candles(otc_a, timeframe="1h", limit=limit)
-        eu_rows = fetch_candles(
-            eu_a, timeframe="1h", limit=limit, table=TABLE_EURUSD
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    # Preferir Dukascopy no grafico; se so houver Pocket (legado), usa Pocket.
-    dukas = [
-        r for r in eu_rows if str(r.get("source") or "").lower() == "dukascopy"
-    ]
-    unknown = [
-        r for r in eu_rows if not str(r.get("source") or "").strip()
-    ]
-    pocket_eu = [
-        r for r in eu_rows if str(r.get("source") or "").lower() == "pocket"
-    ]
-    if dukas:
-        eu_rows = dukas
-        eu_source = "dukascopy"
-    elif unknown and not pocket_eu:
-        eu_rows = unknown
-        eu_source = "legacy"
-    elif pocket_eu:
-        eu_rows = pocket_eu
-        eu_source = "pocket"
-    else:
-        eu_source = "unknown"
+    otc_rows = fetch_candles(otc_a, timeframe="1h", limit=limit)
+    eu_rows = fetch_candles(
+        eu_a, timeframe="1h", limit=limit, table=TABLE_EURUSD
+    )
+    eu_rows, eu_source = _prefer_eurusd_rows(eu_rows)
     try:
         spread = build_spread_1h(otc_rows, eu_rows)
         opens = detect_eurusd_opens(eu_rows)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500, detail=f"Falha ao montar spread: {exc}"
-        ) from exc
-    weekend_n = sum(1 for p in spread if p.get("weekend"))
-    after_hours_n = sum(1 for p in spread if p.get("after_hours"))
+        raise RuntimeError(f"Falha ao montar spread: {exc}") from exc
     return {
-        "timeframe": "1h",
         "otc_asset": otc_a,
         "eurusd_asset": eu_a,
         "eurusd_source": eu_source,
-        "otc_count": len(otc_rows),
-        "eurusd_count": len(eu_rows),
-        "spread_count": len(spread),
-        "weekend_points": weekend_n,
-        "after_hours_points": after_hours_n,
-        "eurusd_opens": opens,
         "otc": otc_rows,
         "eurusd": eu_rows,
         "spread": spread,
+        "eurusd_opens": opens,
     }
