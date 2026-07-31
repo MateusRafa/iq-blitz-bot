@@ -15,6 +15,7 @@ from BinaryOptionsToolsV2.pocketoption import PocketOption
 
 from bot.ohlc_store import (
     last_opened_at,
+    merge_ohlc_with_existing,
     oldest_opened_at,
     stored_summary,
     supabase_ok,
@@ -36,6 +37,12 @@ BACKFILL_OFFSET: dict[str, int] = {
 LIVE_OFFSET: dict[str, int] = {
     "1h": 3600 * 12,  # ~12 velas
 }
+
+# Durante a hora: atualiza a vela em formacao (e as recentes) periodicamente.
+# Sem isso o grafico fica preso no OHLC de ~2 min apos a virada da hora,
+# enquanto a Pocket continua desenhando pavios/corpo ao vivo.
+DEFAULT_LIVE_POLL_SECONDS = 60
+
 
 
 def _env_int(name: str, default: int) -> int:
@@ -343,6 +350,12 @@ class OhlcCollector:
                 if times:
                     oldest = min(times).isoformat()
                     newest = max(times).isoformat()
+                rows = merge_ohlc_with_existing(
+                    rows,
+                    asset=target,
+                    timeframe="1h",
+                    lookback=min(500, max(48, len(rows))),
+                )
                 upserted = upsert_candles(rows)
             was_running = self.is_running()
             self._set(
@@ -575,6 +588,13 @@ class OhlcCollector:
             rows = filtered
         if not rows:
             return 0
+        # Preserva pavios ja salvos (high=max, low=min) — evita tick incompleto
+        # da API apagar o low/high que a Pocket ja mostrou no grafico.
+        rows = merge_ohlc_with_existing(
+            rows, asset=asset, timeframe=tf, lookback=max(48, len(rows) + 12)
+        )
+        if not rows:
+            return 0
         n = upsert_candles(rows)
         with self._lock:
             prev = int(self._snap["per_tf"].get(tf, {}).get("ok", 0) or 0)
@@ -610,26 +630,79 @@ class OhlcCollector:
             time.sleep(min(left, 1.0))
 
     def _wait_for_next_cycle(self) -> None:
-        """Espera ate a proxima coleta (alinhada a hora UTC por padrao)."""
+        """Espera ate a proxima coleta (alinhada a hora UTC por padrao).
+
+        Se OHLC_LIVE_POLL_SECONDS > 0, durante a espera faz fetches curtos
+        para a vela em formacao acompanhar a Pocket (pavios/corpo).
+        """
         align = _env_flag_default_on("OHLC_ALIGN_HOUR", "1")
         after = _env_int("OHLC_AFTER_HOUR_SECONDS", 120)
+        live_every = _env_int(
+            "OHLC_LIVE_POLL_SECONDS", DEFAULT_LIVE_POLL_SECONDS
+        )
         if align:
             wait = seconds_until_next_hourly_fetch(after_hour_seconds=after)
-            mode = "hourly"
+            mode = "hourly+live" if live_every > 0 else "hourly"
         else:
             wait = float(max(_env_int("OHLC_POLL_SECONDS", 3600), 60))
             mode = "poll"
+            live_every = 0
         next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
         self._set(
             phase="waiting",
             poll_mode=mode,
             next_fetch_at=next_at.isoformat(),
             message=(
-                f"Proximo fetch em ~{int(wait // 60)} min "
+                f"Proximo fetch horario em ~{int(wait // 60)} min "
                 f"({next_at.strftime('%H:%M:%S')} UTC)"
+                + (
+                    f" · live a cada {live_every}s"
+                    if live_every > 0
+                    else ""
+                )
             ),
         )
-        self._sleep_interruptible(wait)
+        if live_every <= 0 or not align:
+            self._sleep_interruptible(wait)
+            return
+
+        # Live poll: reconecta periodicamente e atualiza as ultimas velas.
+        end = time.monotonic() + max(wait, 0.0)
+        asset = self._asset
+        while not self._stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            chunk = min(float(live_every), left)
+            self._sleep_interruptible(chunk)
+            if self._stop.is_set() or time.monotonic() >= end:
+                break
+            client: PocketOption | None = None
+            try:
+                self._set(
+                    phase="live",
+                    message=f"Live 1h ({asset}) — atualizando vela em formação…",
+                )
+                client = self._connect()
+                n = self._upsert_tf(client, asset, "1h", backfill=False)
+                left2 = max(0.0, end - time.monotonic())
+                next_at2 = datetime.now(timezone.utc) + timedelta(seconds=left2)
+                self._set(
+                    phase="waiting",
+                    next_fetch_at=next_at2.isoformat(),
+                    message=(
+                        f"Live ok ({n} velas) · próximo horário "
+                        f"{next_at.strftime('%H:%M:%S')} UTC · "
+                        f"live a cada {live_every}s"
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._set(
+                    phase="waiting",
+                    message=f"Live falhou ({exc}); segue até o fetch horário",
+                )
+            finally:
+                self._close_client(client)
 
     def _run(self) -> None:
         asset = self._asset
