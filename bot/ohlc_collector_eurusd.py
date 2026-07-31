@@ -248,13 +248,14 @@ class OhlcCollectorEurusd:
         self,
         *,
         days: int | None = None,
-        match_otc: bool = True,
+        match_otc: bool = False,
         otc_asset: str | None = None,
     ) -> dict[str, Any]:
-        """Backfill profundo Dukascopy para casar com o OTC (ou N dias).
+        """Puxa Dukascopy.
 
-        match_otc=True: usa o opened_at mais antigo de EURUSD_otc no Supabase
-        como inicio (com 1 dia de folga). Senao usa `days` para tras.
+        Padrao (match_otc=False): incremental a partir do ultimo candle
+        Dukascopy salvo (overlap 6h), limitado a `days` para tras.
+        match_otc=True: backfill profundo desde o OTC mais antigo (raro).
         """
         ok, msg = supabase_ok()
         if not ok:
@@ -274,30 +275,37 @@ class OhlcCollectorEurusd:
             or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
             or "EURUSD_otc"
         )
+        ndays = max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
+        matched_otc = False
         try:
             end = datetime.now(timezone.utc)
-            start = end - timedelta(
-                days=max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
-            )
-            matched_otc = False
+
             if match_otc:
+                start = end - timedelta(days=ndays)
                 try:
                     oldest_otc = oldest_opened_at(otc_a, "1h", table=TABLE)
                 except Exception:  # noqa: BLE001
                     oldest_otc = None
                 if oldest_otc is not None:
-                    # 1 dia antes do OTC para alinhar abertura / carry.
                     start = oldest_otc - timedelta(days=1)
                     matched_otc = True
+            else:
+                # Incremental: so o que falta desde o ultimo Dukascopy.
+                start, end = self._resolve_window(
+                    asset, days=ndays, prefer_incremental=True
+                )
 
-            # Se ja houver Dukascopy mais antiga que o alvo, ainda rebaixa
-            # a janela inteira (sobrescreve) — prefer_incremental=False.
             span_days = max(1, int((end - start).total_seconds() // 86400) + 1)
             self._set(
                 phase="history_pull",
                 message=(
-                    f"Historico Dukascopy ~{span_days}d "
-                    f"({'casando OTC ' + otc_a if matched_otc else 'lookback'})…"
+                    f"Dukascopy ~{span_days}d "
+                    + (
+                        f"(casando OTC {otc_a})"
+                        if matched_otc
+                        else "(incremental / recentes)"
+                    )
+                    + "…"
                 ),
                 error=None,
                 next_fetch_at=None,
@@ -306,6 +314,10 @@ class OhlcCollectorEurusd:
             chunk_hours = max(
                 12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 72), 168)
             )
+            # Janela curta: chunks menores = menos ConnectionTerminated.
+            if not matched_otc and span_days <= 21:
+                chunk_hours = min(chunk_hours, 48)
+
             cursor = start
             by_t: dict[str, dict[str, Any]] = {}
             while cursor < end:
@@ -378,13 +390,13 @@ class OhlcCollectorEurusd:
 
         st = self.status()
         st["pull"] = {
-            "mode": "history",
+            "mode": "history_otc" if matched_otc else "history_incremental",
             "upserted": upserted,
             "fetched": fetched,
             "chunks": chunks,
             "asset": asset,
             "source": SOURCE,
-            "match_otc": match_otc,
+            "match_otc": matched_otc,
             "otc_asset": otc_a,
             "from": start.isoformat() if start else None,
             "to": end.isoformat() if end else None,
