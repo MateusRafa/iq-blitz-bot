@@ -16,7 +16,11 @@ from pydantic import BaseModel, Field
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
-from bot.ohlc_spread import build_spread_1h, detect_eurusd_opens
+from bot.ohlc_spread import (
+    build_spread_1h,
+    detect_eurusd_opens,
+    pad_eurusd_tail_to_otc,
+)
 from bot.ohlc_spread_sync import sync_spread_sources
 from bot.ohlc_store import (
     candles_to_csv,
@@ -707,6 +711,8 @@ def _load_spread_bundle(
         eu_a, timeframe="1h", limit=limit, table=TABLE_EURUSD
     )
     eu_rows, eu_source = _prefer_eurusd_rows(eu_rows)
+    # Alinha cauda: OTC costuma ter a hora corrente antes do bi5 Dukascopy.
+    eu_rows = pad_eurusd_tail_to_otc(otc_rows, eu_rows, max_hours=6)
     try:
         spread = build_spread_1h(otc_rows, eu_rows)
         opens = detect_eurusd_opens(eu_rows)
