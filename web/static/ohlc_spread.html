@@ -142,21 +142,6 @@
               Coleta EURUSD
               <span id="run-badge" class="badge badge-off">STAND-BY</span>
             </h2>
-            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              <strong>EURUSD_otc</strong> vem da Pocket (tabela
-              <code>ohlc_candles</code> via
-              <a href="/ohlc" style="color:#22d3ee">/ohlc</a>).
-              <strong>EURUSD</strong> (mercado) é puxado da
-              <strong>Dukascopy</strong> (UTC / Bid) para
-              <code>ohlc_candles_eurusd</code>.
-              “Baixar dados” sincroniza as duas fontes e baixa um ZIP com os CSVs.
-              “Puxar histórico OTC” pagina a API Pocket para trás.
-              “Puxar histórico Dukascopy” atualiza só os candles
-              <strong>mais recentes</strong> (desde o último Dukascopy salvo,
-              com overlap curto) — não rebaixa a base inteira.
-              Após o fechamento diário (e no fim de semana) o spread usa o
-              último close do EURUSD vs cada vela OTC ainda aberta.
-            </p>
             <div class="controls">
               <button type="button" class="btn btn-start" id="btn-start">Iniciar coleta</button>
               <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
@@ -181,12 +166,6 @@
 
           <div class="panel" id="ou-panel">
             <h2>Modelo OU / AR(1) — Fase 1</h2>
-            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Estimativa no spread <code>OTC − EURUSD</code> (pontos
-              <strong>paired</strong> por padrão). Horizontes alinhados ao
-              expiry máximo da Pocket (1h / 2h / 4h). O vies CALL/PUT na OTC
-              é sugerido pela reversão do spread — ainda sem auto-ordem.
-            </p>
             <div class="status-grid" id="ou-grid">
               <div class="status-item"><span class="label">Pontos</span><span class="value" id="ou-n">—</span></div>
               <div class="status-item"><span class="label">Mean-reverting</span><span class="value" id="ou-mr">—</span></div>
@@ -211,12 +190,13 @@
           </div>
 
           <div class="panel" id="paper-panel">
-            <h2>Paper trading — Fase 2</h2>
+            <h2>Paper trading — Fase 2 + 3</h2>
             <p class="message" style="margin-top:0;margin-bottom:0.75rem">
-              Regra: <code>|z| ≥ z_min</code> e
-              <code>p̂ ≥ 1/(1+payout) + margem</code>. Escolhe o melhor T
-              entre 1h/2h/4h. Sem auto-ordem — registre o resultado à mão
-              (WIN/LOSS) para validar se a EV do modelo se confirma.
+              Fase 2: <code>|z| ≥ z_min</code> e
+              <code>p̂ ≥ 1/(1+payout) + margem</code> → GO no melhor T (≤4h).
+              Fase 3: após <strong>LOSS</strong>, reentrada <strong>flat</strong>
+              (mesmo stake, mesmo lado) até o teto de retries — estica o
+              horizonte (8h/12h…) sem martingale. Sem auto-ordem.
             </p>
             <div class="controls" style="flex-wrap:wrap;gap:0.5rem;align-items:end">
               <label class="message" style="margin:0">
@@ -235,8 +215,17 @@
                 Stake
                 <input id="paper-stake" type="number" min="1" step="1" value="100" style="width:5rem;margin-left:0.35rem" />
               </label>
+              <label class="message" style="margin:0">
+                Retries máx
+                <input id="paper-retries" type="number" min="0" max="6" step="1" value="2" title="Reentradas flat após LOSS (total = 1 + retries)" style="width:4rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0;display:flex;align-items:center;gap:0.35rem">
+                <input id="paper-seq-on" type="checkbox" checked />
+                Fase 3 (reentrada flat)
+              </label>
               <button type="button" class="btn btn-apply" id="btn-paper-refresh">Recalcular sinal</button>
               <button type="button" class="btn btn-start" id="btn-paper-log" disabled>Registrar paper</button>
+              <button type="button" class="btn btn-start" id="btn-paper-reentry" disabled>Registrar reentrada</button>
             </div>
             <div class="status-grid" style="margin-top:0.75rem">
               <div class="status-item"><span class="label">Ação</span><span class="value" id="paper-action">—</span></div>
@@ -247,6 +236,8 @@
               <div class="status-item"><span class="label">EV / stake</span><span class="value" id="paper-ev">—</span></div>
               <div class="status-item"><span class="label">z</span><span class="value" id="paper-z">—</span></div>
               <div class="status-item"><span class="label">Paper PnL</span><span class="value" id="paper-pnl">—</span></div>
+              <div class="status-item"><span class="label">Sequência</span><span class="value" id="paper-seq">—</span></div>
+              <div class="status-item"><span class="label">Fase 3</span><span class="value" id="paper-phase3">—</span></div>
             </div>
             <p class="message" id="paper-msg"></p>
             <div class="controls" style="margin-top:0.35rem">
@@ -258,6 +249,8 @@
                 <thead>
                   <tr style="text-align:left;border-bottom:1px solid rgba(34,211,238,0.25)">
                     <th style="padding:0.35rem">Quando</th>
+                    <th>Seq</th>
+                    <th>#</th>
                     <th>Ação</th>
                     <th>Lado</th>
                     <th>T</th>
@@ -345,6 +338,8 @@
       const PAPER_ZMIN_KEY = "iq_blitz_spread_paper_zmin";
       const PAPER_EDGE_KEY = "iq_blitz_spread_paper_edge";
       const PAPER_STAKE_KEY = "iq_blitz_spread_paper_stake";
+      const PAPER_RETRIES_KEY = "iq_blitz_spread_paper_retries";
+      const PAPER_SEQ_ON_KEY = "iq_blitz_spread_paper_seq_on";
       const LINE_COLORS = [
         "#f472b6",
         "#34d399",
@@ -1633,6 +1628,7 @@
       }
 
       let lastPaperSignal = null;
+      let lastPhase3Plan = null;
 
       function loadPaperLog() {
         try {
@@ -1649,6 +1645,134 @@
         try {
           localStorage.setItem(PAPER_LOG_KEY, JSON.stringify(rows.slice(0, 500)));
         } catch (_) {}
+      }
+
+      function paperSeqEnabled() {
+        const el = document.getElementById("paper-seq-on");
+        return el ? !!el.checked : true;
+      }
+
+      function paperMaxRetries() {
+        return Math.max(0, Number(document.getElementById("paper-retries")?.value || 2));
+      }
+
+      function findOpenSequenceTrade(rows) {
+        // Primeiro trade da lista (mais recente) que ainda define a sequencia ativa.
+        for (const r of rows) {
+          if (!r.sequence_id) continue;
+          if (r.result === "PENDING") return r;
+          if (r.result === "LOSS" && paperSeqEnabled()) return r;
+          if (r.result === "WIN" || r.result === "VOID") return null;
+          // LOSS sem fase 3: sequencia morta
+          if (r.result === "LOSS") return null;
+        }
+        return null;
+      }
+
+      function planFlatReentry(signal, previous, maxRetries) {
+        const base = { action: "NONE", max_retries: maxRetries, stake_mode: "flat", reasons: [] };
+        if (!previous) {
+          base.reasons = ["Sem trade anterior na sequencia"];
+          return base;
+        }
+        const result = String(previous.result || "").toUpperCase();
+        const attempt = Number(previous.attempt || 1);
+        const sidePrev = String(previous.otc_side || "").toUpperCase();
+        const seqId = previous.sequence_id;
+        const stake = previous.stake;
+        if (result === "WIN") {
+          return { ...base, action: "CLOSE_WIN", sequence_id: seqId, attempt, reasons: ["Sequencia encerrada no WIN"] };
+        }
+        if (result === "VOID") {
+          return { ...base, action: "CLOSE_VOID", sequence_id: seqId, attempt, reasons: ["Sequencia encerrada (VOID)"] };
+        }
+        if (result !== "LOSS") {
+          return { ...base, action: "WAIT", sequence_id: seqId, attempt, reasons: ["Aguarde resolver W/L do paper pendente"] };
+        }
+        if (attempt >= 1 + maxRetries) {
+          return {
+            ...base,
+            action: "STOP",
+            sequence_id: seqId,
+            attempt,
+            reasons: [`Teto da sequencia: ${attempt}/${1 + maxRetries} tentativas — pare`],
+          };
+        }
+        if (!signal || signal.action !== "GO") {
+          return { ...base, action: "STOP", sequence_id: seqId, attempt, reasons: ["Sinal atual nao e GO — nao reentrar"] };
+        }
+        const sideNow = String(signal.otc_side || "").toUpperCase();
+        if (sideNow !== sidePrev) {
+          return {
+            ...base,
+            action: "STOP",
+            sequence_id: seqId,
+            attempt,
+            reasons: [`Lado mudou (${sidePrev} → ${sideNow}) — nao reentrar`],
+          };
+        }
+        const nextAttempt = attempt + 1;
+        return {
+          action: "REENTRY",
+          max_retries: maxRetries,
+          stake_mode: "flat",
+          sequence_id: seqId,
+          attempt: nextAttempt,
+          otc_side: sideNow,
+          horizon: signal.horizon,
+          hours: signal.hours,
+          p_hat: signal.p_hat,
+          payout: signal.payout,
+          ev: signal.ev,
+          z: signal.z,
+          stake,
+          reasons: [
+            `REENTRY flat #${nextAttempt}/${1 + maxRetries} ${sideNow} ${signal.horizon} (apos LOSS; stake igual)`,
+          ],
+        };
+      }
+
+      function refreshPhase3Plan() {
+        lastPhase3Plan = null;
+        const seqEl = document.getElementById("paper-seq");
+        const p3El = document.getElementById("paper-phase3");
+        const reBtn = document.getElementById("btn-paper-reentry");
+        if (!paperSeqEnabled()) {
+          if (seqEl) seqEl.textContent = "off";
+          if (p3El) p3El.textContent = "desligada";
+          if (reBtn) reBtn.disabled = true;
+          return;
+        }
+        const rows = loadPaperLog();
+        const prev = findOpenSequenceTrade(rows);
+        if (!prev) {
+          if (seqEl) seqEl.textContent = "—";
+          if (p3El) p3El.textContent = "aguardando entrada";
+          if (reBtn) reBtn.disabled = true;
+          return;
+        }
+        const plan = planFlatReentry(lastPaperSignal, prev, paperMaxRetries());
+        lastPhase3Plan = plan;
+        if (seqEl) {
+          seqEl.textContent =
+            String(prev.sequence_id || "").slice(-6) +
+            " · #" +
+            (prev.attempt || 1);
+        }
+        if (p3El) p3El.textContent = plan.action || "—";
+        if (reBtn) reBtn.disabled = plan.action !== "REENTRY";
+        if (plan.action === "REENTRY" || plan.action === "STOP") {
+          const msg = document.getElementById("paper-msg");
+          const extra = Array.isArray(plan.reasons) ? plan.reasons.join(" · ") : "";
+          if (msg && extra) {
+            const base = msg.textContent && !msg.textContent.includes("REENTRY") && !msg.textContent.includes("Teto")
+              ? msg.textContent + " · "
+              : "";
+            if (plan.action === "REENTRY" || plan.action === "STOP") {
+              msg.textContent = (msg.dataset.sigMsg || base) + extra;
+            }
+          }
+        }
       }
 
       function paperStats(rows) {
@@ -1701,9 +1825,14 @@
                  <button type="button" class="btn btn-mode" data-paper-loss="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">L</button>
                  <button type="button" class="btn btn-mode" data-paper-void="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">∅</button>`
               : String(r.result || "—");
+          const seqShort = r.sequence_id
+            ? String(r.sequence_id).slice(-6)
+            : "—";
           tr.innerHTML =
             `<td style="padding:0.35rem;white-space:nowrap">${when}</td>` +
-            `<td>${r.action || "—"}</td>` +
+            `<td>${seqShort}</td>` +
+            `<td>${r.attempt != null ? r.attempt : "—"}</td>` +
+            `<td>${r.kind || r.action || "—"}</td>` +
             `<td>${r.otc_side || "—"}</td>` +
             `<td>${r.horizon || "—"}</td>` +
             `<td>${r.p_hat != null ? (Number(r.p_hat) * 100).toFixed(1) + "%" : "—"}</td>` +
@@ -1722,6 +1851,7 @@
         tbody.querySelectorAll("[data-paper-void]").forEach((btn) => {
           btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-void"), "VOID"));
         });
+        refreshPhase3Plan();
       }
 
       function setPaperResult(id, result) {
@@ -1732,6 +1862,15 @@
         rows[i].resolved_at = Date.now();
         savePaperLog(rows);
         renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (result === "LOSS" && paperSeqEnabled()) {
+          refreshPhase3Plan();
+          if (lastPhase3Plan && lastPhase3Plan.action === "REENTRY" && msg) {
+            msg.textContent = (lastPhase3Plan.reasons || []).join(" · ");
+          } else if (lastPhase3Plan && lastPhase3Plan.action === "STOP" && msg) {
+            msg.textContent = (lastPhase3Plan.reasons || []).join(" · ");
+          }
+        }
       }
 
       function renderPaperSignal(payload) {
@@ -1759,9 +1898,14 @@
         );
         set("paper-z", fmtNum(sig.z, 2));
         const reasons = Array.isArray(sig.reasons) ? sig.reasons.join(" · ") : "";
-        set("paper-msg", reasons || "—");
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.dataset.sigMsg = reasons || "";
+          msg.textContent = reasons || "—";
+        }
         const logBtn = document.getElementById("btn-paper-log");
         if (logBtn) logBtn.disabled = action !== "GO";
+        refreshPhase3Plan();
       }
 
       function registerPaperTrade() {
@@ -1771,10 +1915,14 @@
           localStorage.setItem(PAPER_STAKE_KEY, String(stake));
         } catch (_) {}
         const rows = loadPaperLog();
+        const seqId = "seq-" + Date.now();
         rows.unshift({
           id: String(Date.now()) + "-" + Math.floor(Math.random() * 1e6),
           ts: Date.now(),
           action: "GO",
+          kind: "ENTRY",
+          sequence_id: seqId,
+          attempt: 1,
           otc_side: lastPaperSignal.otc_side,
           horizon: lastPaperSignal.horizon,
           hours: lastPaperSignal.hours,
@@ -1790,11 +1938,53 @@
         const msg = document.getElementById("paper-msg");
         if (msg) {
           msg.textContent =
-            "Paper registrado: " +
+            "Paper ENTRY #1: " +
             lastPaperSignal.otc_side +
             " " +
             lastPaperSignal.horizon +
-            " · marque W/L quando o expiry da Pocket terminar.";
+            " · marque W/L no expiry.";
+        }
+      }
+
+      function registerPaperReentry() {
+        if (!lastPhase3Plan || lastPhase3Plan.action !== "REENTRY") return;
+        if (!lastPaperSignal || lastPaperSignal.action !== "GO") return;
+        const stake = Number(
+          lastPhase3Plan.stake != null
+            ? lastPhase3Plan.stake
+            : document.getElementById("paper-stake")?.value || 100
+        );
+        const rows = loadPaperLog();
+        rows.unshift({
+          id: String(Date.now()) + "-" + Math.floor(Math.random() * 1e6),
+          ts: Date.now(),
+          action: "GO",
+          kind: "REENTRY",
+          sequence_id: lastPhase3Plan.sequence_id,
+          attempt: lastPhase3Plan.attempt,
+          otc_side: lastPhase3Plan.otc_side || lastPaperSignal.otc_side,
+          horizon: lastPhase3Plan.horizon || lastPaperSignal.horizon,
+          hours: lastPhase3Plan.hours || lastPaperSignal.hours,
+          p_hat: lastPhase3Plan.p_hat != null ? lastPhase3Plan.p_hat : lastPaperSignal.p_hat,
+          payout: lastPhase3Plan.payout != null ? lastPhase3Plan.payout : lastPaperSignal.payout,
+          ev: lastPhase3Plan.ev != null ? lastPhase3Plan.ev : lastPaperSignal.ev,
+          z: lastPhase3Plan.z != null ? lastPhase3Plan.z : lastPaperSignal.z,
+          stake: stake,
+          result: "PENDING",
+        });
+        savePaperLog(rows);
+        renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.textContent =
+            "Paper REENTRY #" +
+            lastPhase3Plan.attempt +
+            ": " +
+            (lastPhase3Plan.otc_side || "") +
+            " " +
+            (lastPhase3Plan.horizon || "") +
+            " · stake flat " +
+            stake;
         }
       }
 
@@ -1802,6 +1992,9 @@
         const rows = loadPaperLog();
         const header = [
           "ts_iso",
+          "sequence_id",
+          "attempt",
+          "kind",
           "action",
           "otc_side",
           "horizon",
@@ -1817,6 +2010,9 @@
           lines.push(
             [
               r.ts ? new Date(r.ts).toISOString() : "",
+              r.sequence_id || "",
+              r.attempt != null ? r.attempt : "",
+              r.kind || "",
               r.action || "",
               r.otc_side || "",
               r.horizon || "",
@@ -1892,6 +2088,8 @@
         const zEl = document.getElementById("paper-zmin");
         const edgeEl = document.getElementById("paper-edge");
         const stakeEl = document.getElementById("paper-stake");
+        const retriesEl = document.getElementById("paper-retries");
+        const seqOnEl = document.getElementById("paper-seq-on");
         try {
           if (payoutEl && localStorage.getItem(PAPER_PAYOUT_KEY)) {
             payoutEl.value = localStorage.getItem(PAPER_PAYOUT_KEY);
@@ -1905,7 +2103,22 @@
           if (stakeEl && localStorage.getItem(PAPER_STAKE_KEY)) {
             stakeEl.value = localStorage.getItem(PAPER_STAKE_KEY);
           }
+          if (retriesEl && localStorage.getItem(PAPER_RETRIES_KEY)) {
+            retriesEl.value = localStorage.getItem(PAPER_RETRIES_KEY);
+          }
+          if (seqOnEl && localStorage.getItem(PAPER_SEQ_ON_KEY) != null) {
+            seqOnEl.checked = localStorage.getItem(PAPER_SEQ_ON_KEY) === "1";
+          }
         } catch (_) {}
+        const persistSeqPrefs = () => {
+          try {
+            if (retriesEl) localStorage.setItem(PAPER_RETRIES_KEY, String(retriesEl.value));
+            if (seqOnEl) localStorage.setItem(PAPER_SEQ_ON_KEY, seqOnEl.checked ? "1" : "0");
+          } catch (_) {}
+          refreshPhase3Plan();
+        };
+        if (retriesEl) retriesEl.addEventListener("change", persistSeqPrefs);
+        if (seqOnEl) seqOnEl.addEventListener("change", persistSeqPrefs);
         const btnRef = document.getElementById("btn-paper-refresh");
         if (btnRef) {
           btnRef.addEventListener("click", async () => {
@@ -1919,6 +2132,8 @@
         }
         const btnLog = document.getElementById("btn-paper-log");
         if (btnLog) btnLog.addEventListener("click", () => registerPaperTrade());
+        const btnRe = document.getElementById("btn-paper-reentry");
+        if (btnRe) btnRe.addEventListener("click", () => registerPaperReentry());
         const btnExp = document.getElementById("btn-paper-export");
         if (btnExp) btnExp.addEventListener("click", () => exportPaperCsv());
         const btnClr = document.getElementById("btn-paper-clear");
