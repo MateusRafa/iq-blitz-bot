@@ -260,4 +260,66 @@ def fetch_eurusd_1h_rows_for_store(
                 "updated_at": now_iso,
             }
         )
-    return out
+    return ensure_provisional_current_hour(out, asset=asset)
+
+
+def ensure_provisional_current_hour(
+    rows: list[dict[str, Any]],
+    *,
+    asset: str = "EURUSD",
+) -> list[dict[str, Any]]:
+    """Se o bi5 da hora UTC atual ainda nao existe, cria vela provisoria.
+
+    A Pocket OTC ja abre a vela da hora corrente; sem isso o EURUSD Dukascopy
+    fica 1 candle atrasado no grafico ate o arquivo bi5 aparecer.
+    """
+    if not rows:
+        return rows
+    now = datetime.now(timezone.utc)
+    # Sab/dom: mercado FX fechado — nao inventa vela.
+    if now.weekday() >= 5:
+        return rows
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    hour_key = hour.strftime("%Y-%m-%dT%H:%M:%S")
+    have = False
+    last_close: float | None = None
+    last_ts: datetime | None = None
+    for r in rows:
+        try:
+            c = float(r["close"])
+            ts = datetime.fromisoformat(
+                str(r["opened_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        if last_ts is None or ts >= last_ts:
+            last_ts = ts
+            last_close = c
+        opened = ts.replace(minute=0, second=0, microsecond=0)
+        if opened.strftime("%Y-%m-%dT%H:%M:%S") == hour_key:
+            have = True
+    if have or last_close is None:
+        return rows
+    # So completa se a ultima vela real for a hora imediatamente anterior
+    # (atraso tipico de 1h), nao se faltar dias de dados.
+    if last_ts is not None and hour - last_ts.replace(
+        minute=0, second=0, microsecond=0
+    ) > timedelta(hours=2):
+        return rows
+    provisional = {
+        "asset": asset,
+        "timeframe": "1h",
+        "opened_at": hour.isoformat(),
+        "open": last_close,
+        "high": last_close,
+        "low": last_close,
+        "close": last_close,
+        "volume": 0.0,
+        "source": "dukascopy",
+        "updated_at": now.isoformat(),
+    }
+    return list(rows) + [provisional]
