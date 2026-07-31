@@ -386,3 +386,116 @@ def evaluate_paper_signal(
             f"p̂={chosen['p_hat']:.1%} EV={chosen['ev']:+.3f}/stake"
         ],
     }
+
+
+def plan_flat_reentry(
+    signal: dict[str, Any],
+    *,
+    previous: dict[str, Any] | None,
+    max_retries: int = 2,
+) -> dict[str, Any]:
+    """Fase 3: estica o tempo com reentrada flat (mesmo stake), sem martingale.
+
+    Apos LOSS no expiry (<=4h), se o sinal ainda for GO no mesmo lado e
+    attempt <= max_retries, sugere REENTRY. Assim 1 entrada + ate N retries
+    cobrem ~8h/12h/… sem dobrar stake.
+
+    previous: ultimo trade da sequencia aberta
+      {result, otc_side, attempt, sequence_id, stake}
+    """
+    max_retries = max(0, int(max_retries))
+    base = {
+        "action": "NONE",
+        "max_retries": max_retries,
+        "stake_mode": "flat",
+        "reasons": [],
+    }
+    if not previous:
+        base["reasons"] = ["Sem trade anterior na sequencia"]
+        return base
+
+    result = str(previous.get("result") or "").upper()
+    attempt = int(previous.get("attempt") or 1)
+    side_prev = str(previous.get("otc_side") or "").upper()
+    seq_id = previous.get("sequence_id")
+    stake = previous.get("stake")
+
+    if result == "WIN":
+        return {
+            **base,
+            "action": "CLOSE_WIN",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": ["Sequencia encerrada no WIN"],
+        }
+    if result == "VOID":
+        return {
+            **base,
+            "action": "CLOSE_VOID",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": ["Sequencia encerrada (VOID)"],
+        }
+    if result != "LOSS":
+        return {
+            **base,
+            "action": "WAIT",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": ["Aguarde resolver W/L do paper pendente"],
+        }
+
+    # LOSS
+    if attempt >= 1 + max_retries:
+        return {
+            **base,
+            "action": "STOP",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": [
+                f"Teto da sequencia: {attempt}/{1 + max_retries} tentativas "
+                "(entrada + retries) — pare"
+            ],
+        }
+
+    if not signal or signal.get("action") != "GO":
+        return {
+            **base,
+            "action": "STOP",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": ["Sinal atual nao e GO — nao reentrar"],
+        }
+
+    side_now = str(signal.get("otc_side") or "").upper()
+    if side_now != side_prev:
+        return {
+            **base,
+            "action": "STOP",
+            "sequence_id": seq_id,
+            "attempt": attempt,
+            "reasons": [
+                f"Lado mudou ({side_prev} → {side_now}) — nao reentrar"
+            ],
+        }
+
+    next_attempt = attempt + 1
+    return {
+        "action": "REENTRY",
+        "max_retries": max_retries,
+        "stake_mode": "flat",
+        "sequence_id": seq_id,
+        "attempt": next_attempt,
+        "otc_side": side_now,
+        "horizon": signal.get("horizon"),
+        "hours": signal.get("hours"),
+        "p_hat": signal.get("p_hat"),
+        "payout": signal.get("payout"),
+        "ev": signal.get("ev"),
+        "z": signal.get("z"),
+        "stake": stake,
+        "reasons": [
+            f"REENTRY flat #{next_attempt}/{1 + max_retries} {side_now} "
+            f"{signal.get('horizon')} (apos LOSS; stake igual)"
+        ],
+    }
