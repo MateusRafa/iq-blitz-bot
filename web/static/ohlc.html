@@ -52,17 +52,62 @@
       }
       .chart-modes .btn-mode,
       .pnf-opts .btn-mode,
-      .cum-opts .btn-mode {
+      .cum-opts .btn-mode,
+      .overlay-opts .btn-mode {
         font-size: 0.82rem;
         padding: 0.35rem 0.7rem;
         opacity: 0.72;
       }
       .chart-modes .btn-mode.active,
       .pnf-opts .btn-mode.active,
-      .cum-opts .btn-mode.active {
+      .cum-opts .btn-mode.active,
+      .overlay-opts .btn-mode.active {
         opacity: 1;
         outline: 1px solid rgba(34, 211, 238, 0.55);
         background: rgba(34, 211, 238, 0.12);
+      }
+      .overlay-opts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .overlay-opts .pnf-opts-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-right: 0.15rem;
+      }
+      .overlay-opts .ma-period-input {
+        width: 4.2rem;
+        padding: 0.3rem 0.45rem;
+        border-radius: 6px;
+        border: 1px solid rgba(34, 211, 238, 0.35);
+        background: #0a1220;
+        color: #e2e8f0;
+        font-size: 0.85rem;
+      }
+      .spread-wrap {
+        display: none;
+        margin-top: 0.65rem;
+      }
+      .spread-wrap.visible {
+        display: block;
+      }
+      .spread-wrap .prob-title {
+        margin: 0 0 0.35rem;
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+      .chart-wrap--spread {
+        height: 180px;
+        min-height: 140px;
+        margin-top: 0;
+      }
+      .spread-chart {
+        width: 100%;
+        height: 100%;
+        min-height: 140px;
       }
       .pnf-opts {
         display: none;
@@ -254,6 +299,16 @@
                 <button type="button" class="btn btn-mode" id="btn-prob-link">Link acum.</button>
               </span>
             </div>
+            <div id="overlay-opts" class="overlay-opts" role="group" aria-label="Indicadores de preço">
+              <span class="pnf-opts-label">Overlays:</span>
+              <button type="button" class="btn btn-mode" id="btn-vwap">VWAP</button>
+              <button type="button" class="btn btn-mode" id="btn-ma">Média móvel</button>
+              <label class="pnf-opts-label" for="ma-period">Período</label>
+              <input id="ma-period" class="ma-period-input" type="number" min="1" max="500" step="1" value="20" />
+              <span class="pnf-opts-label">Spreads:</span>
+              <button type="button" class="btn btn-mode" id="btn-spread-ma">Spread MM</button>
+              <button type="button" class="btn btn-mode" id="btn-spread-vwap">Spread VWAP</button>
+            </div>
             <p class="message" style="margin-top:0.5rem;margin-bottom:0.5rem" id="chart-meta">
               —
             </p>
@@ -275,6 +330,18 @@
               <p class="prob-title" id="prob-side-hint" style="margin-top:-0.15rem;color:#cbd5e1"></p>
               <div class="chart-wrap chart-wrap--prob">
                 <div id="prob-chart"></div>
+              </div>
+            </div>
+            <div id="spread-ma-wrap" class="spread-wrap">
+              <p class="prob-title">Spread MM · close − média móvel (SMA)</p>
+              <div class="chart-wrap chart-wrap--spread">
+                <div id="spread-ma-chart" class="spread-chart"></div>
+              </div>
+            </div>
+            <div id="spread-vwap-wrap" class="spread-wrap">
+              <p class="prob-title">Spread VWAP · close − VWAP (sessão UTC; volume ou peso 1)</p>
+              <div class="chart-wrap chart-wrap--spread">
+                <div id="spread-vwap-chart" class="spread-chart"></div>
               </div>
             </div>
           </div>
@@ -328,16 +395,31 @@
       const indNeg = document.getElementById("ind-neg");
       const indDoji = document.getElementById("ind-doji");
       const cumOptsEl = document.getElementById("cum-opts");
+      const overlayOptsEl = document.getElementById("overlay-opts");
       const probWrapEl = document.getElementById("prob-wrap");
       const probChartEl = document.getElementById("prob-chart");
       const btnProbToggle = document.getElementById("btn-prob-toggle");
       const btnProbLink = document.getElementById("btn-prob-link");
       const probLineOptsEl = document.getElementById("prob-line-opts");
+      const btnVwap = document.getElementById("btn-vwap");
+      const btnMa = document.getElementById("btn-ma");
+      const btnSpreadMa = document.getElementById("btn-spread-ma");
+      const btnSpreadVwap = document.getElementById("btn-spread-vwap");
+      const maPeriodInput = document.getElementById("ma-period");
+      const spreadMaWrapEl = document.getElementById("spread-ma-wrap");
+      const spreadVwapWrapEl = document.getElementById("spread-vwap-wrap");
+      const spreadMaChartEl = document.getElementById("spread-ma-chart");
+      const spreadVwapChartEl = document.getElementById("spread-vwap-chart");
       const CHART_MODE_KEY = "iq_blitz_ohlc_chart_mode";
       const PNF_SRC_KEY = "iq_blitz_ohlc_pnf_src";
       const PROB_ON_KEY = "iq_blitz_ohlc_prob_on";
       const PROB_LINK_KEY = "iq_blitz_ohlc_prob_link";
       const PROB_LINES_KEY = "iq_blitz_ohlc_prob_lines";
+      const VWAP_ON_KEY = "iq_blitz_ohlc_vwap_on";
+      const MA_ON_KEY = "iq_blitz_ohlc_ma_on";
+      const MA_PERIOD_KEY = "iq_blitz_ohlc_ma_period";
+      const SPREAD_MA_ON_KEY = "iq_blitz_ohlc_spread_ma_on";
+      const SPREAD_VWAP_ON_KEY = "iq_blitz_ohlc_spread_vwap_on";
       const CHART_MODES = ["ohlc", "signed", "cum", "bodycum", "streak", "pnf"];
       const PROB_HORIZONS = [
         { key: "1h", bars: 1, color: "#22d3ee" },
@@ -354,6 +436,12 @@
       let chart = null;
       let activeSeries = null;
       let zeroLine = null;
+      let overlayVwap = null;
+      let overlayMa = null;
+      let spreadMaChart = null;
+      let spreadVwapChart = null;
+      let spreadMaSeries = null;
+      let spreadVwapSeries = null;
       let probChart = null;
       let probSeries = { "1h": null, "4h": null, "8h": null };
       let chartMode = localStorage.getItem(CHART_MODE_KEY) || "ohlc";
@@ -362,6 +450,14 @@
       if (!["hl", "close"].includes(pnfSource)) pnfSource = "hl";
       let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
       let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
+      let vwapOn = localStorage.getItem(VWAP_ON_KEY) === "1";
+      let maOn = localStorage.getItem(MA_ON_KEY) === "1";
+      let spreadMaOn = localStorage.getItem(SPREAD_MA_ON_KEY) === "1";
+      let spreadVwapOn = localStorage.getItem(SPREAD_VWAP_ON_KEY) === "1";
+      let maPeriod = parseInt(localStorage.getItem(MA_PERIOD_KEY) || "20", 10);
+      if (!Number.isFinite(maPeriod) || maPeriod < 1) maPeriod = 20;
+      if (maPeriod > 500) maPeriod = 500;
+      if (maPeriodInput) maPeriodInput.value = String(maPeriod);
       let probLinesOn = { "1h": true, "4h": true, "8h": true };
       try {
         const savedLines = JSON.parse(localStorage.getItem(PROB_LINES_KEY) || "");
@@ -405,7 +501,12 @@
           btnProbLink.classList.toggle("active", probLinkOn);
           btnProbLink.textContent = probLinkOn ? "Link ON" : "Link acum.";
         }
+        btnVwap.classList.toggle("active", vwapOn);
+        btnMa.classList.toggle("active", maOn);
+        btnSpreadMa.classList.toggle("active", spreadMaOn);
+        btnSpreadVwap.classList.toggle("active", spreadVwapOn);
         updateProbPanel();
+        updateSpreadPanels();
       }
       syncModeButtons();
 
@@ -428,6 +529,7 @@
           chart.applyOptions({ width: w, height: h });
         }
         resizeProbChart();
+        resizeSpreadCharts();
       }
 
       function resizeProbChart() {
@@ -437,8 +539,38 @@
         probChart.applyOptions({ width: w, height: h });
       }
 
+      function resizeSpreadCharts() {
+        for (const [ch, el, wrap] of [
+          [spreadMaChart, spreadMaChartEl, spreadMaWrapEl],
+          [spreadVwapChart, spreadVwapChartEl, spreadVwapWrapEl],
+        ]) {
+          if (!ch || !el || !wrap.classList.contains("visible")) continue;
+          const w = Math.max(el.clientWidth || el.parentElement?.clientWidth || 0, 100);
+          const h = Math.max(el.clientHeight || 180, 140);
+          ch.applyOptions({ width: w, height: h });
+        }
+      }
+
+      function clearOverlaySeries() {
+        if (!chart) {
+          overlayVwap = null;
+          overlayMa = null;
+          return;
+        }
+        for (const key of ["overlayVwap", "overlayMa"]) {
+          const s = key === "overlayVwap" ? overlayVwap : overlayMa;
+          if (!s) continue;
+          try {
+            chart.removeSeries(s);
+          } catch (_) {}
+        }
+        overlayVwap = null;
+        overlayMa = null;
+      }
+
       function clearSeries() {
         if (!chart) return;
+        clearOverlaySeries();
         if (activeSeries) {
           try {
             if (zeroLine && typeof activeSeries.removePriceLine === "function") {
@@ -640,6 +772,240 @@
           low: c.low,
           close: c.close,
         }));
+      }
+
+      /** VWAP diário UTC: Σ(TP·V)/Σ(V); V=volume ou 1. */
+      function buildVwapSeries(candles) {
+        const out = [];
+        let sumPV = 0;
+        let sumV = 0;
+        let dayKey = null;
+        for (const c of candles) {
+          const d = new Date(c.time * 1000);
+          const key =
+            d.getUTCFullYear() +
+            "-" +
+            d.getUTCMonth() +
+            "-" +
+            d.getUTCDate();
+          if (key !== dayKey) {
+            sumPV = 0;
+            sumV = 0;
+            dayKey = key;
+          }
+          const tp = (c.high + c.low + c.close) / 3;
+          const v =
+            Number.isFinite(c.volume) && c.volume > 0 ? c.volume : 1;
+          sumPV += tp * v;
+          sumV += v;
+          out.push({ time: c.time, value: sumPV / sumV });
+        }
+        return out;
+      }
+
+      /** SMA do close. */
+      function buildSmaSeries(candles, period) {
+        const p = Math.max(1, Math.floor(Number(period) || 1));
+        const out = [];
+        let sum = 0;
+        for (let i = 0; i < candles.length; i++) {
+          sum += candles[i].close;
+          if (i >= p) sum -= candles[i - p].close;
+          if (i >= p - 1) {
+            out.push({ time: candles[i].time, value: sum / p });
+          }
+        }
+        return out;
+      }
+
+      function buildSpreadFromBaseline(candles, baseline) {
+        const map = new Map();
+        for (const p of baseline) map.set(p.time, p.value);
+        const out = [];
+        for (const c of candles) {
+          if (!map.has(c.time)) continue;
+          out.push({ time: c.time, value: c.close - map.get(c.time) });
+        }
+        return out;
+      }
+
+      function syncPriceOverlays() {
+        clearOverlaySeries();
+        if (!chart || chartMode !== "ohlc" || !rawCandles.length) return;
+        if (vwapOn) {
+          overlayVwap = chart.addLineSeries({
+            color: "#fbbf24",
+            lineWidth: 2,
+            title: "VWAP",
+            priceLineVisible: false,
+            lastValueVisible: true,
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          overlayVwap.setData(buildVwapSeries(rawCandles));
+        }
+        if (maOn) {
+          overlayMa = chart.addLineSeries({
+            color: "#a78bfa",
+            lineWidth: 2,
+            title: "MM" + maPeriod,
+            priceLineVisible: false,
+            lastValueVisible: true,
+            priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          });
+          overlayMa.setData(buildSmaSeries(rawCandles, maPeriod));
+        }
+      }
+
+      function createSpreadChart(el) {
+        const w = Math.max(el.clientWidth || 600, 100);
+        const h = Math.max(el.clientHeight || 180, 140);
+        const ch = LightweightCharts.createChart(el, {
+          autoSize: false,
+          layout: {
+            background: { color: "#0a1220" },
+            textColor: "#94a3b8",
+          },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: {
+            borderColor: "rgba(34,211,238,0.25)",
+            scaleMargins: { top: 0.1, bottom: 0.1 },
+          },
+          timeScale: {
+            borderColor: "rgba(34,211,238,0.25)",
+            timeVisible: true,
+          },
+          width: w,
+          height: h,
+        });
+        const series = ch.addLineSeries({
+          color: "#22d3ee",
+          lineWidth: 2,
+          priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+          lastValueVisible: true,
+          priceLineVisible: false,
+        });
+        series.createPriceLine({
+          price: 0,
+          color: "rgba(148, 163, 184, 0.7)",
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "0",
+        });
+        return { chart: ch, series };
+      }
+
+      function updateSpreadPanels() {
+        if (typeof LightweightCharts === "undefined") return;
+
+        const syncOne = (
+          on,
+          wrap,
+          chartEl,
+          getChart,
+          setChart,
+          getSeries,
+          setSeries,
+          buildPts,
+          color
+        ) => {
+          wrap.classList.toggle("visible", !!on);
+          if (!on) return;
+          if (!getChart()) {
+            const created = createSpreadChart(chartEl);
+            setChart(created.chart);
+            setSeries(created.series);
+            if (typeof ResizeObserver !== "undefined") {
+              new ResizeObserver(() => resizeSpreadCharts()).observe(
+                chartEl.parentElement || chartEl
+              );
+            }
+          }
+          const series = getSeries();
+          if (!series) return;
+          series.applyOptions({ color });
+          const pts = rawCandles.length ? buildPts() : [];
+          series.setData(pts);
+          getChart().timeScale().fitContent();
+        };
+
+        syncOne(
+          spreadMaOn,
+          spreadMaWrapEl,
+          spreadMaChartEl,
+          () => spreadMaChart,
+          (c) => {
+            spreadMaChart = c;
+          },
+          () => spreadMaSeries,
+          (s) => {
+            spreadMaSeries = s;
+          },
+          () =>
+            buildSpreadFromBaseline(
+              rawCandles,
+              buildSmaSeries(rawCandles, maPeriod)
+            ),
+          "#a78bfa"
+        );
+        syncOne(
+          spreadVwapOn,
+          spreadVwapWrapEl,
+          spreadVwapChartEl,
+          () => spreadVwapChart,
+          (c) => {
+            spreadVwapChart = c;
+          },
+          () => spreadVwapSeries,
+          (s) => {
+            spreadVwapSeries = s;
+          },
+          () =>
+            buildSpreadFromBaseline(rawCandles, buildVwapSeries(rawCandles)),
+          "#fbbf24"
+        );
+        requestAnimationFrame(() => resizeSpreadCharts());
+      }
+
+      function setVwapOn(on) {
+        vwapOn = !!on;
+        localStorage.setItem(VWAP_ON_KEY, vwapOn ? "1" : "0");
+        syncModeButtons();
+        if (chartMode === "ohlc") syncPriceOverlays();
+      }
+
+      function setMaOn(on) {
+        maOn = !!on;
+        localStorage.setItem(MA_ON_KEY, maOn ? "1" : "0");
+        syncModeButtons();
+        if (chartMode === "ohlc") syncPriceOverlays();
+        if (spreadMaOn) updateSpreadPanels();
+      }
+
+      function setMaPeriod(v) {
+        let p = parseInt(v, 10);
+        if (!Number.isFinite(p) || p < 1) p = 1;
+        if (p > 500) p = 500;
+        maPeriod = p;
+        localStorage.setItem(MA_PERIOD_KEY, String(maPeriod));
+        if (maPeriodInput) maPeriodInput.value = String(maPeriod);
+        if (chartMode === "ohlc" && maOn) syncPriceOverlays();
+        if (spreadMaOn) updateSpreadPanels();
+      }
+
+      function setSpreadMaOn(on) {
+        spreadMaOn = !!on;
+        localStorage.setItem(SPREAD_MA_ON_KEY, spreadMaOn ? "1" : "0");
+        syncModeButtons();
+      }
+
+      function setSpreadVwapOn(on) {
+        spreadVwapOn = !!on;
+        localStorage.setItem(SPREAD_VWAP_ON_KEY, spreadVwapOn ? "1" : "0");
+        syncModeButtons();
       }
 
       /** Corpo/pavios relativos ao open = 0 (positivos acima, negativos abaixo). */
@@ -1152,6 +1518,7 @@
               lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
             drawPnF();
             updateProbPanel();
+            updateSpreadPanels();
             return;
           }
           pnfColumns = buildPnFColumns(rawCandles, PNF_BOX, PNF_REVERSAL);
@@ -1163,6 +1530,7 @@
               pnfSource === "close" ? "só fechamento" : "máx/mín"
             } · caixa ${PNF_BOX_POINTS} pts · rev ${PNF_REVERSAL}`;
           updateProbPanel();
+          updateSpreadPanels();
           return;
         }
 
@@ -1170,6 +1538,7 @@
         if (!chart) {
           chartMeta.textContent = "Biblioteca de gráfico indisponível.";
           updateProbPanel();
+          updateSpreadPanels();
           return;
         }
         clearSeries();
@@ -1177,6 +1546,7 @@
           chartMeta.textContent =
             lastMetaText || "Nenhum candle no Supabase. Inicie o coletor para gravar.";
           updateProbPanel();
+          updateSpreadPanels();
           return;
         }
 
@@ -1191,6 +1561,7 @@
             priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
           });
           activeSeries.setData(buildOhlcData(rawCandles));
+          syncPriceOverlays();
         } else if (chartMode === "signed") {
           activeSeries = chart.addCandlestickSeries({
             upColor: "#22d3ee",
@@ -1227,6 +1598,7 @@
         }, 50);
         if (lastMetaText) chartMeta.textContent = lastMetaText;
         updateProbPanel();
+        updateSpreadPanels();
       }
 
       function setChartMode(mode) {
@@ -1269,6 +1641,7 @@
             high: Math.max(h, o, c),
             low: Math.min(l, o, c),
             close: c,
+            volume: Number.isFinite(Number(r.volume)) ? Number(r.volume) : 0,
           });
           prevT = t;
         }
@@ -1535,6 +1908,28 @@
 
       btnProbLink.addEventListener("click", () => {
         setProbLinkOn(!probLinkOn);
+      });
+
+      btnVwap.addEventListener("click", () => {
+        setVwapOn(!vwapOn);
+      });
+      btnMa.addEventListener("click", () => {
+        setMaOn(!maOn);
+      });
+      btnSpreadMa.addEventListener("click", () => {
+        setSpreadMaOn(!spreadMaOn);
+      });
+      btnSpreadVwap.addEventListener("click", () => {
+        setSpreadVwapOn(!spreadVwapOn);
+      });
+      maPeriodInput.addEventListener("change", () => {
+        setMaPeriod(maPeriodInput.value);
+      });
+      maPeriodInput.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          setMaPeriod(maPeriodInput.value);
+        }
       });
 
       (async () => {
