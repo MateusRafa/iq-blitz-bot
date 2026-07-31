@@ -135,3 +135,60 @@ def test_evaluate_paper_signal_skip_low_z():
     }
     sig = evaluate_paper_signal(ou, payout=0.92, z_min=1.5, edge_margin=0.03)
     assert sig["action"] == "SKIP"
+
+
+def test_plan_flat_reentry_after_loss():
+    from bot.spread_ou import plan_flat_reentry
+
+    signal = {
+        "action": "GO",
+        "otc_side": "CALL",
+        "horizon": "4h",
+        "hours": 4,
+        "p_hat": 0.6,
+        "payout": 0.92,
+        "ev": 0.15,
+        "z": -1.8,
+    }
+    prev = {
+        "result": "LOSS",
+        "otc_side": "CALL",
+        "attempt": 1,
+        "sequence_id": "seq-1",
+        "stake": 100,
+    }
+    plan = plan_flat_reentry(signal, previous=prev, max_retries=2)
+    assert plan["action"] == "REENTRY"
+    assert plan["attempt"] == 2
+    assert plan["stake"] == 100
+    assert plan["stake_mode"] == "flat"
+
+
+def test_plan_flat_reentry_stops_at_ceiling():
+    from bot.spread_ou import plan_flat_reentry
+
+    signal = {"action": "GO", "otc_side": "CALL", "horizon": "4h"}
+    prev = {
+        "result": "LOSS",
+        "otc_side": "CALL",
+        "attempt": 3,
+        "sequence_id": "seq-1",
+        "stake": 100,
+    }
+    plan = plan_flat_reentry(signal, previous=prev, max_retries=2)
+    assert plan["action"] == "STOP"
+
+
+def test_plan_flat_reentry_stops_on_side_change():
+    from bot.spread_ou import plan_flat_reentry
+
+    signal = {"action": "GO", "otc_side": "PUT", "horizon": "4h"}
+    prev = {
+        "result": "LOSS",
+        "otc_side": "CALL",
+        "attempt": 1,
+        "sequence_id": "seq-1",
+        "stake": 100,
+    }
+    plan = plan_flat_reentry(signal, previous=prev, max_retries=2)
+    assert plan["action"] == "STOP"
