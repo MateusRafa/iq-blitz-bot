@@ -78,10 +78,10 @@ class OhlcSpreadOtcHistoryBody(BaseModel):
 
 
 class OhlcSpreadDukaHistoryBody(BaseModel):
-    """Backfill profundo Dukascopy (casa com OTC ou N dias)."""
+    """Backfill Dukascopy: incremental (recente) por padrao; match_otc so se pedido."""
 
-    days: int = Field(default=600, ge=7, le=800)
-    match_otc: bool = True
+    days: int = Field(default=14, ge=1, le=800)
+    match_otc: bool = False
     otc_asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -519,7 +519,7 @@ def ohlc_spread_backfill_dukascopy(
     body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
     _: None = Depends(require_token),
 ) -> dict:
-    """Puxa historico Dukascopy alinhado ao EURUSD_otc (ou N dias)."""
+    """Puxa Dukascopy recente (incremental). match_otc=true so se pedido explicitamente."""
     try:
         pull = collector_eurusd.pull_history(
             days=body.days,
