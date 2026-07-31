@@ -517,12 +517,14 @@ class OhlcCollectorEurusd:
         align = _env_flag_default_on("OHLC_EURUSD_ALIGN_HOUR", "1")
         # Apos virar a hora, espera um pouco para o bi5 da Dukascopy existir.
         after = _env_int("OHLC_EURUSD_AFTER_HOUR_SECONDS", 180)
+        live_every = _env_int("OHLC_EURUSD_LIVE_POLL_SECONDS", 60)
         if align:
             wait = seconds_until_next_hourly_fetch(after_hour_seconds=after)
-            mode = "hourly"
+            mode = "hourly+live" if live_every > 0 else "hourly"
         else:
             wait = float(max(_env_int("OHLC_EURUSD_POLL_SECONDS", 3600), 60))
             mode = "poll"
+            live_every = 0
         next_at = datetime.now(timezone.utc) + timedelta(seconds=wait)
         self._set(
             phase="waiting",
@@ -531,9 +533,56 @@ class OhlcCollectorEurusd:
             message=(
                 f"Proximo fetch Dukascopy em ~{int(wait // 60)} min "
                 f"({next_at.strftime('%H:%M:%S')} UTC)"
+                + (f" · live a cada {live_every}s" if live_every > 0 else "")
             ),
         )
-        self._sleep_interruptible(wait)
+        if live_every <= 0 or not align:
+            self._sleep_interruptible(wait)
+            return
+
+        end = time.monotonic() + max(wait, 0.0)
+        asset = self._asset
+        while not self._stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            chunk = min(float(live_every), left)
+            self._sleep_interruptible(chunk)
+            if self._stop.is_set() or time.monotonic() >= end:
+                break
+            try:
+                if not self._pull_lock.acquire(blocking=False):
+                    continue
+                try:
+                    self._set(
+                        phase="live",
+                        message="Live Dukascopy — atualizando hora corrente…",
+                    )
+                    n = self._sync_dukascopy(
+                        asset,
+                        days=max(1, _lookback_days(backfill=False)),
+                        purge_pocket=True,
+                        prefer_incremental=True,
+                    )
+                    left2 = max(0.0, end - time.monotonic())
+                    next_at2 = datetime.now(timezone.utc) + timedelta(
+                        seconds=left2
+                    )
+                    self._set(
+                        phase="waiting",
+                        next_fetch_at=next_at2.isoformat(),
+                        message=(
+                            f"Live Dukascopy ok ({n}) · horário "
+                            f"{next_at.strftime('%H:%M:%S')} UTC"
+                        ),
+                    )
+                finally:
+                    self._pull_lock.release()
+            except Exception as exc:  # noqa: BLE001
+                self._set(
+                    phase="waiting",
+                    message=f"Live Dukascopy falhou ({exc}); segue até o fetch",
+                )
 
     def _run(self) -> None:
         asset = self._asset
