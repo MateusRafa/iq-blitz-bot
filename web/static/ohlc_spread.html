@@ -151,8 +151,9 @@
               <code>ohlc_candles_eurusd</code>.
               “Baixar dados” sincroniza as duas fontes e baixa um ZIP com os CSVs.
               “Puxar histórico OTC” pagina a API Pocket para trás.
-              “Puxar histórico Dukascopy” baixa EURUSD desde o candle OTC mais
-              antigo no Supabase, para casar as duas séries no gráfico.
+              “Puxar histórico Dukascopy” atualiza só os candles
+              <strong>mais recentes</strong> (desde o último Dukascopy salvo,
+              com overlap curto) — não rebaixa a base inteira.
               Após o fechamento diário (e no fim de semana) o spread usa o
               último close do EURUSD vs cada vela OTC ainda aberta.
             </p>
@@ -2009,21 +2010,20 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Puxando histórico Dukascopy alinhado ao EURUSD_otc… pode demorar vários minutos.";
+            "Puxando Dukascopy recente (incremental desde o último salvo)…";
           const st = await api("/api/ohlc-spread/backfill-dukascopy", "POST", {
-            days: 600,
-            match_otc: true,
+            days: 14,
+            match_otc: false,
             otc_asset: "EURUSD_otc",
           });
           renderStatus(st);
           const bf = st.backfill_dukascopy || {};
           document.getElementById("s-msg").textContent =
-            `Histórico Dukascopy: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            `Dukascopy recente: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.mode ? ` · ${bf.mode}` : "") +
             (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
-            (bf.from ? ` · pedido ${bf.from} → ${bf.to || "?"}` : "") +
-            (bf.stored_oldest
-              ? ` · salvo ${bf.stored_oldest} → ${bf.newest || "?"}`
-              : "");
+            (bf.from ? ` · ${bf.from} → ${bf.to || "?"}` : "") +
+            (bf.newest ? ` · até ${bf.newest}` : "");
           await loadCharts();
         } catch (e) {
           setCmdErro(e.message || String(e));
