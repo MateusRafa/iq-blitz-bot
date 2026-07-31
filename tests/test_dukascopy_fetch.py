@@ -69,7 +69,77 @@ def test_fetch_rows_for_store_maps_source():
             datetime(2026, 7, 29, tzinfo=timezone.utc),
             asset="EURUSD",
         )
-    assert len(rows) == 1
+    assert len(rows) >= 1
     assert rows[0]["source"] == "dukascopy"
     assert rows[0]["timeframe"] == "1h"
     assert rows[0]["asset"] == "EURUSD"
+
+
+def test_ensure_provisional_current_hour_when_bi5_missing():
+    from bot import dukascopy_fetch as mod
+
+    now = datetime(2026, 7, 29, 20, 40, tzinfo=timezone.utc)  # quarta
+    prev = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    rows = [
+        {
+            "asset": "EURUSD",
+            "timeframe": "1h",
+            "opened_at": prev.isoformat(),
+            "open": 1.1,
+            "high": 1.1,
+            "low": 1.1,
+            "close": 1.12,
+            "source": "dukascopy",
+        }
+    ]
+
+    real_dt = datetime
+
+    class _DT:
+        @staticmethod
+        def now(tz=None):
+            return now
+
+        @staticmethod
+        def fromisoformat(s):
+            return real_dt.fromisoformat(s)
+
+    with patch.object(mod, "datetime", _DT):
+        out = mod.ensure_provisional_current_hour(rows, asset="EURUSD")
+    assert len(out) == 2
+    assert out[-1]["close"] == 1.12
+    assert "2026-07-29T20:00:00" in out[-1]["opened_at"]
+
+
+def test_pad_eurusd_tail_adds_one_hour():
+    from bot.ohlc_spread import pad_eurusd_tail_to_otc
+
+    otc = [
+        {"opened_at": "2026-07-29T18:00:00+00:00", "close": 1.15},
+        {"opened_at": "2026-07-29T19:00:00+00:00", "close": 1.16},
+        {"opened_at": "2026-07-29T20:00:00+00:00", "close": 1.17},
+    ]
+    eu = [
+        {
+            "asset": "EURUSD",
+            "opened_at": "2026-07-29T18:00:00+00:00",
+            "open": 1.10,
+            "high": 1.10,
+            "low": 1.10,
+            "close": 1.10,
+            "source": "dukascopy",
+        },
+        {
+            "asset": "EURUSD",
+            "opened_at": "2026-07-29T19:00:00+00:00",
+            "open": 1.11,
+            "high": 1.11,
+            "low": 1.11,
+            "close": 1.11,
+            "source": "dukascopy",
+        },
+    ]
+    out = pad_eurusd_tail_to_otc(otc, eu, max_hours=6)
+    assert len(out) == 3
+    assert "2026-07-29T20:00:00" in out[-1]["opened_at"]
+    assert out[-1]["close"] == 1.11
