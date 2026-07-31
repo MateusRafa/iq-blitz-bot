@@ -380,6 +380,7 @@
       let rawCandles = []; // {time, open, high, low, close}
       let lastChartAsset = "";
       let lastChartCount = -1;
+      let lastCandleFingerprint = "";
       let lastMetaText = "";
       let pnfColumns = [];
       const pnfOptsEl = document.getElementById("pnf-opts");
@@ -1274,6 +1275,27 @@
         return series;
       }
 
+      function candleFingerprint(rows) {
+        if (!rows || !rows.length) return "";
+        const last = rows[rows.length - 1] || {};
+        const prev = rows.length > 1 ? rows[rows.length - 2] : {};
+        // Inclui penultima+ultima: evita grafico preso quando a vela em
+        // formacao muda OHLC (ex.: vermelha → azul) sem mudar a contagem.
+        return [
+          rows.length,
+          last.opened_at,
+          last.open,
+          last.high,
+          last.low,
+          last.close,
+          prev.opened_at,
+          prev.open,
+          prev.high,
+          prev.low,
+          prev.close,
+        ].join("|");
+      }
+
       async function loadChart(asset, force) {
         ensureChart();
         if (!chart) {
@@ -1288,16 +1310,19 @@
           });
           const data = await api("/api/ohlc/candles?" + q.toString());
           const rows = data.candles || [];
+          const fp = candleFingerprint(rows);
           if (
             !force &&
             data.asset === lastChartAsset &&
-            rows.length === lastChartCount
+            rows.length === lastChartCount &&
+            fp === lastCandleFingerprint
           ) {
             resizeChart();
             return;
           }
           lastChartAsset = data.asset || "";
           lastChartCount = rows.length;
+          lastCandleFingerprint = fp;
           if (!rows.length) {
             rawCandles = [];
             lastMetaText =
