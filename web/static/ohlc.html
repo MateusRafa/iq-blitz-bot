@@ -316,6 +316,7 @@
             <div id="overlay-opts" class="overlay-opts" role="group" aria-label="Indicadores de preço">
               <span class="pnf-opts-label">Overlays:</span>
               <button type="button" class="btn btn-mode" id="btn-vwap">VWAP</button>
+              <button type="button" class="btn btn-mode" id="btn-vwap-bands">VWAP Bands</button>
               <button type="button" class="btn btn-mode" id="btn-ma">Média móvel</button>
               <label class="pnf-opts-label" for="ma-period">Período</label>
               <input id="ma-period" class="ma-period-input" type="number" min="1" max="500" step="1" value="20" />
@@ -416,6 +417,7 @@
       const btnProbLink = document.getElementById("btn-prob-link");
       const probLineOptsEl = document.getElementById("prob-line-opts");
       const btnVwap = document.getElementById("btn-vwap");
+      const btnVwapBands = document.getElementById("btn-vwap-bands");
       const btnMa = document.getElementById("btn-ma");
       const btnSpreadMa = document.getElementById("btn-spread-ma");
       const btnSpreadVwap = document.getElementById("btn-spread-vwap");
@@ -430,6 +432,7 @@
       const PROB_LINK_KEY = "iq_blitz_ohlc_prob_link";
       const PROB_LINES_KEY = "iq_blitz_ohlc_prob_lines";
       const VWAP_ON_KEY = "iq_blitz_ohlc_vwap_on";
+      const VWAP_BANDS_ON_KEY = "iq_blitz_ohlc_vwap_bands_on";
       const MA_ON_KEY = "iq_blitz_ohlc_ma_on";
       const MA_PERIOD_KEY = "iq_blitz_ohlc_ma_period";
       const SPREAD_MA_ON_KEY = "iq_blitz_ohlc_spread_ma_on";
@@ -451,6 +454,7 @@
       let activeSeries = null;
       let zeroLine = null;
       let overlayVwap = null;
+      let overlayVwapBands = [];
       let overlayMa = null;
       let spreadMaChart = null;
       let spreadVwapChart = null;
@@ -465,6 +469,7 @@
       let probOn = localStorage.getItem(PROB_ON_KEY) === "1";
       let probLinkOn = localStorage.getItem(PROB_LINK_KEY) === "1";
       let vwapOn = localStorage.getItem(VWAP_ON_KEY) === "1";
+      let vwapBandsOn = localStorage.getItem(VWAP_BANDS_ON_KEY) === "1";
       let maOn = localStorage.getItem(MA_ON_KEY) === "1";
       let spreadMaOn = localStorage.getItem(SPREAD_MA_ON_KEY) === "1";
       let spreadVwapOn = localStorage.getItem(SPREAD_VWAP_ON_KEY) === "1";
@@ -516,6 +521,7 @@
           btnProbLink.textContent = probLinkOn ? "Link ON" : "Link acum.";
         }
         btnVwap.classList.toggle("active", vwapOn);
+        btnVwapBands.classList.toggle("active", vwapBandsOn);
         btnMa.classList.toggle("active", maOn);
         btnSpreadMa.classList.toggle("active", spreadMaOn);
         btnSpreadVwap.classList.toggle("active", spreadVwapOn);
@@ -568,17 +574,18 @@
       function clearOverlaySeries() {
         if (!chart) {
           overlayVwap = null;
+          overlayVwapBands = [];
           overlayMa = null;
           return;
         }
-        for (const key of ["overlayVwap", "overlayMa"]) {
-          const s = key === "overlayVwap" ? overlayVwap : overlayMa;
+        for (const s of [overlayVwap, overlayMa, ...overlayVwapBands]) {
           if (!s) continue;
           try {
             chart.removeSeries(s);
           } catch (_) {}
         }
         overlayVwap = null;
+        overlayVwapBands = [];
         overlayMa = null;
       }
 
@@ -788,10 +795,19 @@
         }));
       }
 
-      /** VWAP diário UTC: Σ(TP·V)/Σ(V); V=volume ou 1. */
-      function buildVwapSeries(candles) {
-        const out = [];
+      /**
+       * VWAP + bandas diárias UTC.
+       * VWAP = Σ(TP·V)/Σ(V); σ = sqrt(Σ(TP²·V)/Σ(V) − VWAP²); V=volume ou 1.
+       * Bandas: ±1σ e ±2σ.
+       */
+      function buildVwapBundle(candles) {
+        const vwap = [];
+        const upper1 = [];
+        const lower1 = [];
+        const upper2 = [];
+        const lower2 = [];
         let sumPV = 0;
+        let sumPV2 = 0;
         let sumV = 0;
         let dayKey = null;
         for (const c of candles) {
@@ -804,6 +820,7 @@
             d.getUTCDate();
           if (key !== dayKey) {
             sumPV = 0;
+            sumPV2 = 0;
             sumV = 0;
             dayKey = key;
           }
@@ -811,10 +828,22 @@
           const v =
             Number.isFinite(c.volume) && c.volume > 0 ? c.volume : 1;
           sumPV += tp * v;
+          sumPV2 += tp * tp * v;
           sumV += v;
-          out.push({ time: c.time, value: sumPV / sumV });
+          const mean = sumPV / sumV;
+          const variance = Math.max(0, sumPV2 / sumV - mean * mean);
+          const std = Math.sqrt(variance);
+          vwap.push({ time: c.time, value: mean });
+          upper1.push({ time: c.time, value: mean + std });
+          lower1.push({ time: c.time, value: mean - std });
+          upper2.push({ time: c.time, value: mean + 2 * std });
+          lower2.push({ time: c.time, value: mean - 2 * std });
         }
-        return out;
+        return { vwap, upper1, lower1, upper2, lower2 };
+      }
+
+      function buildVwapSeries(candles) {
+        return buildVwapBundle(candles).vwap;
       }
 
       /** SMA do close. */
@@ -846,7 +875,9 @@
       function syncPriceOverlays() {
         clearOverlaySeries();
         if (!chart || chartMode !== "ohlc" || !rawCandles.length) return;
-        if (vwapOn) {
+        const needVwap = vwapOn || vwapBandsOn;
+        const bundle = needVwap ? buildVwapBundle(rawCandles) : null;
+        if (vwapOn && bundle) {
           overlayVwap = chart.addLineSeries({
             color: "#fbbf24",
             lineWidth: 2,
@@ -855,7 +886,29 @@
             lastValueVisible: true,
             priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
           });
-          overlayVwap.setData(buildVwapSeries(rawCandles));
+          overlayVwap.setData(bundle.vwap);
+        }
+        if (vwapBandsOn && bundle) {
+          const bandSpecs = [
+            { data: bundle.upper2, color: "rgba(251,191,36,0.35)", title: "+2σ", width: 1 },
+            { data: bundle.lower2, color: "rgba(251,191,36,0.35)", title: "-2σ", width: 1 },
+            { data: bundle.upper1, color: "rgba(251,191,36,0.65)", title: "+1σ", width: 1 },
+            { data: bundle.lower1, color: "rgba(251,191,36,0.65)", title: "-1σ", width: 1 },
+          ];
+          overlayVwapBands = [];
+          for (const spec of bandSpecs) {
+            const s = chart.addLineSeries({
+              color: spec.color,
+              lineWidth: spec.width,
+              lineStyle: 2,
+              title: spec.title,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
+            });
+            s.setData(spec.data);
+            overlayVwapBands.push(s);
+          }
         }
         if (maOn) {
           overlayMa = chart.addLineSeries({
@@ -987,6 +1040,13 @@
       function setVwapOn(on) {
         vwapOn = !!on;
         localStorage.setItem(VWAP_ON_KEY, vwapOn ? "1" : "0");
+        syncModeButtons();
+        if (chartMode === "ohlc") syncPriceOverlays();
+      }
+
+      function setVwapBandsOn(on) {
+        vwapBandsOn = !!on;
+        localStorage.setItem(VWAP_BANDS_ON_KEY, vwapBandsOn ? "1" : "0");
         syncModeButtons();
         if (chartMode === "ohlc") syncPriceOverlays();
       }
@@ -1926,6 +1986,9 @@
 
       btnVwap.addEventListener("click", () => {
         setVwapOn(!vwapOn);
+      });
+      btnVwapBands.addEventListener("click", () => {
+        setVwapBandsOn(!vwapBandsOn);
       });
       btnMa.addEventListener("click", () => {
         setMaOn(!maOn);
