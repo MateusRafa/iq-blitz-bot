@@ -1,0 +1,2319 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spread Olymp OTC vs EURUSD — IQ Blitz</title>
+    <link rel="stylesheet" href="/static/portal.css" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+      .chart-wrap {
+        width: 100%;
+        height: 360px;
+        min-height: 280px;
+        margin-top: 0.5rem;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(34, 211, 238, 0.25);
+        background: #0a1220;
+      }
+      .chart-wrap--spread {
+        height: 200px;
+        min-height: 160px;
+        position: relative;
+      }
+      #spread-open-lines {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        z-index: 2;
+      }
+      .chart-wrap--half {
+        height: 220px;
+        min-height: 180px;
+      }
+      .split-charts {
+        display: none;
+        flex-direction: column;
+        gap: 0.65rem;
+      }
+      .split-charts.visible {
+        display: flex;
+      }
+      .overlay-wrap.visible {
+        display: block;
+      }
+      .overlay-wrap {
+        display: none;
+      }
+      .chart-modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.35rem 0 0.15rem;
+      }
+      .chart-modes .btn-mode {
+        font-size: 0.82rem;
+        padding: 0.35rem 0.7rem;
+        opacity: 0.72;
+      }
+      .chart-modes .btn-mode.active {
+        opacity: 1;
+        outline: 1px solid rgba(34, 211, 238, 0.55);
+        background: rgba(34, 211, 238, 0.12);
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.85rem;
+        font-size: 0.82rem;
+        color: #94a3b8;
+        margin: 0.35rem 0;
+      }
+      .legend span::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        margin-right: 0.35rem;
+        vertical-align: -1px;
+      }
+      .lg-otc::before { background: #22d3ee; }
+      .lg-eu::before { background: #fbbf24; }
+      .lg-spread::before { background: #a78bfa; }
+      .lg-wknd::before { background: #f43f5e; }
+      .lg-open::before { background: #22d3ee; }
+      .chart-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin: 0.25rem 0 0;
+      }
+      .chart-wrap.drawing {
+        cursor: crosshair;
+      }
+      .draw-hint {
+        font-size: 0.78rem;
+        color: #67e8f9;
+        min-height: 1.1em;
+        margin: 0.15rem 0 0.25rem;
+      }
+      .draw-hint:empty {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="portal-root">
+      <header class="portal-header">
+        <div class="portal-header-inner">
+          <div class="portal-header-bar">
+            <div class="portal-header-stack portal-header-stack--with-back">
+              <a class="portal-back-icon" href="/" title="Voltar ao portal" aria-label="Voltar ao portal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+              </a>
+              <div class="portal-header-text">
+                <h1 class="portal-header-title">Spread Olymp × EURUSD</h1>
+                <p class="portal-header-subtitle">1h · descasamento (fim de semana em destaque)</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="portal-main portal-main--wide">
+        <div id="auth-box" class="panel">
+          <h2>Acesso</h2>
+          <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+            Informe o <code>CONTROL_TOKEN</code> configurado no Railway.
+          </p>
+          <div class="token-bar">
+            <input id="token-input" type="password" placeholder="CONTROL_TOKEN" autocomplete="off" />
+            <button type="button" class="btn" id="token-save">Salvar</button>
+          </div>
+          <div id="auth-erro" class="erro" hidden></div>
+        </div>
+
+        <div id="app-box" hidden>
+          <div class="panel">
+            <h2>
+              Coleta EURUSD
+              <span id="run-badge" class="badge badge-off">STAND-BY</span>
+            </h2>
+            <div class="controls">
+              <button type="button" class="btn btn-start" id="btn-start">Iniciar coleta</button>
+              <button type="button" class="btn btn-stop" id="btn-stop" disabled>Parar</button>
+              <button type="button" class="btn btn-apply" id="btn-pull">Sincronizar agora</button>
+              <button type="button" class="btn btn-apply" id="btn-otc-history">Puxar histórico OTC</button>
+              <button type="button" class="btn btn-start" id="btn-duka-history">Puxar histórico Dukascopy</button>
+              <button type="button" class="btn btn-apply" id="btn-download">Baixar dados</button>
+              <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
+            </div>
+            <div id="cmd-erro" class="erro" hidden></div>
+            <div class="status-grid">
+              <div class="status-item"><span class="label">EURUSD fase</span><span class="value" id="s-phase">—</span></div>
+              <div class="status-item"><span class="label">EURUSD salvos</span><span class="value" id="s-eu">—</span></div>
+              <div class="status-item"><span class="label">OTC salvos</span><span class="value" id="s-otc">—</span></div>
+              <div class="status-item"><span class="label">OTC coletor</span><span class="value" id="s-otc-run">—</span></div>
+              <div class="status-item"><span class="label">Spread pts</span><span class="value" id="s-spread">—</span></div>
+              <div class="status-item"><span class="label">Fora do horário</span><span class="value" id="s-wknd">—</span></div>
+              <div class="status-item"><span class="label">Aberturas</span><span class="value" id="s-opens">—</span></div>
+            </div>
+            <p class="message" id="s-msg"></p>
+          </div>
+
+          <div class="panel" id="ou-panel">
+            <h2>Modelo OU / AR(1) — Fase 1</h2>
+            <div class="status-grid" id="ou-grid">
+              <div class="status-item"><span class="label">Pontos</span><span class="value" id="ou-n">—</span></div>
+              <div class="status-item"><span class="label">Mean-reverting</span><span class="value" id="ou-mr">—</span></div>
+              <div class="status-item"><span class="label">θ (theta)</span><span class="value" id="ou-theta">—</span></div>
+              <div class="status-item"><span class="label">Half-life</span><span class="value" id="ou-hl">—</span></div>
+              <div class="status-item"><span class="label">σ eq</span><span class="value" id="ou-sig">—</span></div>
+              <div class="status-item"><span class="label">z atual</span><span class="value" id="ou-z">—</span></div>
+              <div class="status-item"><span class="label">Spread agora</span><span class="value" id="ou-x">—</span></div>
+              <div class="status-item"><span class="label">φ (AR1)</span><span class="value" id="ou-phi">—</span></div>
+            </div>
+            <div class="status-grid" style="margin-top:0.65rem">
+              <div class="status-item"><span class="label">p̂ 1h</span><span class="value" id="ou-p1">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 1h</span><span class="value" id="ou-pay1">—</span></div>
+              <div class="status-item"><span class="label">p̂ 2h</span><span class="value" id="ou-p2">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 2h</span><span class="value" id="ou-pay2">—</span></div>
+              <div class="status-item"><span class="label">p̂ 4h</span><span class="value" id="ou-p4">—</span></div>
+              <div class="status-item"><span class="label">payout mín. 4h</span><span class="value" id="ou-pay4">—</span></div>
+              <div class="status-item"><span class="label">Vies OTC</span><span class="value" id="ou-bias">—</span></div>
+              <div class="status-item"><span class="label">Melhor T</span><span class="value" id="ou-best">—</span></div>
+            </div>
+            <p class="message" id="ou-msg"></p>
+          </div>
+
+          <div class="panel" id="paper-panel">
+            <h2>Paper trading — Fase 2 + 3</h2>
+            <p class="message" style="margin-top:0;margin-bottom:0.75rem">
+              Fase 2: <code>|z| ≥ z_min</code> e
+              <code>p̂ ≥ 1/(1+payout) + margem</code> → GO no melhor T (≤4h).
+              Fase 3: após <strong>LOSS</strong>, reentrada <strong>flat</strong>
+              (mesmo stake, mesmo lado) até o teto de retries — estica o
+              horizonte (8h/12h…) sem martingale. Sem auto-ordem.
+            </p>
+            <div class="controls" style="flex-wrap:wrap;gap:0.5rem;align-items:end">
+              <label class="message" style="margin:0">
+                Payout %
+                <input id="paper-payout" type="number" min="1" max="200" step="1" value="92" style="width:5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                |z| mín
+                <input id="paper-zmin" type="number" min="0" max="5" step="0.1" value="1.5" style="width:4.5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                Margem
+                <input id="paper-edge" type="number" min="0" max="20" step="0.5" value="3" title="Pontos percentuais acima do breakeven" style="width:4.5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                Stake
+                <input id="paper-stake" type="number" min="1" step="1" value="100" style="width:5rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0">
+                Retries máx
+                <input id="paper-retries" type="number" min="0" max="6" step="1" value="2" title="Reentradas flat após LOSS (total = 1 + retries)" style="width:4rem;margin-left:0.35rem" />
+              </label>
+              <label class="message" style="margin:0;display:flex;align-items:center;gap:0.35rem">
+                <input id="paper-seq-on" type="checkbox" checked />
+                Fase 3 (reentrada flat)
+              </label>
+              <button type="button" class="btn btn-apply" id="btn-paper-refresh">Recalcular sinal</button>
+              <button type="button" class="btn btn-start" id="btn-paper-log" disabled>Registrar paper</button>
+              <button type="button" class="btn btn-start" id="btn-paper-reentry" disabled>Registrar reentrada</button>
+            </div>
+            <div class="status-grid" style="margin-top:0.75rem">
+              <div class="status-item"><span class="label">Ação</span><span class="value" id="paper-action">—</span></div>
+              <div class="status-item"><span class="label">Lado OTC</span><span class="value" id="paper-side">—</span></div>
+              <div class="status-item"><span class="label">Expiry</span><span class="value" id="paper-horizon">—</span></div>
+              <div class="status-item"><span class="label">p̂</span><span class="value" id="paper-phat">—</span></div>
+              <div class="status-item"><span class="label">p necessária</span><span class="value" id="paper-pneed">—</span></div>
+              <div class="status-item"><span class="label">EV / stake</span><span class="value" id="paper-ev">—</span></div>
+              <div class="status-item"><span class="label">z</span><span class="value" id="paper-z">—</span></div>
+              <div class="status-item"><span class="label">Paper PnL</span><span class="value" id="paper-pnl">—</span></div>
+              <div class="status-item"><span class="label">Sequência</span><span class="value" id="paper-seq">—</span></div>
+              <div class="status-item"><span class="label">Fase 3</span><span class="value" id="paper-phase3">—</span></div>
+            </div>
+            <p class="message" id="paper-msg"></p>
+            <div class="controls" style="margin-top:0.35rem">
+              <button type="button" class="btn btn-mode" id="btn-paper-export">Exportar log CSV</button>
+              <button type="button" class="btn btn-mode" id="btn-paper-clear">Limpar log</button>
+            </div>
+            <div style="overflow:auto;max-height:240px;margin-top:0.5rem">
+              <table id="paper-table" style="width:100%;border-collapse:collapse;font-size:0.8rem;color:#94a3b8">
+                <thead>
+                  <tr style="text-align:left;border-bottom:1px solid rgba(34,211,238,0.25)">
+                    <th style="padding:0.35rem">Quando</th>
+                    <th>Seq</th>
+                    <th>#</th>
+                    <th>Ação</th>
+                    <th>Lado</th>
+                    <th>T</th>
+                    <th>p̂</th>
+                    <th>Pay</th>
+                    <th>Stake</th>
+                    <th>z</th>
+                    <th>Resultado</th>
+                  </tr>
+                </thead>
+                <tbody id="paper-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Preços 1h</h2>
+            <div class="chart-modes" role="group" aria-label="Layout">
+              <button type="button" class="btn btn-mode active" id="btn-overlay">Overlay</button>
+              <button type="button" class="btn btn-mode" id="btn-split">Separar</button>
+              <button type="button" class="btn btn-mode" id="btn-link">Link off</button>
+              <button type="button" class="btn btn-mode active" id="btn-price-style">Candles</button>
+              <button type="button" class="btn btn-mode" id="btn-fit">Enquadrar</button>
+            </div>
+            <div class="chart-modes" role="group" aria-label="Desenho no gráfico de preço">
+              <button type="button" class="btn btn-mode" id="btn-draw-price-h" title="Clique no gráfico para marcar o nível">Linha H</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-trend" title="Dois cliques: início e fim">Tendência</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-erase" title="Clique perto de uma linha para remover">Apagar</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-price-clear">Limpar linhas</button>
+            </div>
+            <p class="draw-hint" id="draw-hint-price"></p>
+            <div class="legend">
+              <span class="lg-otc">EURUSD_otc_olymp (Olymptrade)</span>
+              <span class="lg-eu">EURUSD (Dukascopy)</span>
+            </div>
+            <p class="message" id="chart-meta">—</p>
+
+            <div id="overlay-wrap" class="overlay-wrap visible">
+              <div class="chart-wrap" id="price-chart"></div>
+            </div>
+            <div id="split-wrap" class="split-charts">
+              <p class="chart-label">EURUSD_otc_olymp</p>
+              <div class="chart-wrap chart-wrap--half" id="otc-chart"></div>
+              <p class="chart-label">EURUSD</p>
+              <div class="chart-wrap chart-wrap--half" id="eu-chart"></div>
+            </div>
+
+            <h2 style="margin-top:1.25rem">Spread (OTC − EURUSD)</h2>
+            <div class="chart-modes" role="group" aria-label="Camadas do spread">
+              <button type="button" class="btn btn-mode active" id="btn-after-hours">Fora do horário EURUSD</button>
+              <button type="button" class="btn btn-mode active" id="btn-opens">Abertura diária EURUSD</button>
+            </div>
+            <div class="chart-modes" role="group" aria-label="Desenho no gráfico de spread">
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-h" title="Clique no gráfico para marcar o nível">Linha H</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-trend" title="Dois cliques: início e fim">Tendência</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-erase" title="Clique perto de uma linha para remover">Apagar</button>
+              <button type="button" class="btn btn-mode" id="btn-draw-spread-clear">Limpar linhas</button>
+            </div>
+            <p class="draw-hint" id="draw-hint-spread"></p>
+            <div class="legend">
+              <span class="lg-spread">Spread</span>
+              <span class="lg-wknd" id="lg-wknd">fora do horário EURUSD</span>
+              <span class="lg-open" id="lg-open">abertura diária EURUSD</span>
+            </div>
+            <div class="chart-wrap chart-wrap--spread" id="spread-chart-wrap">
+              <div id="spread-chart" style="width:100%;height:100%"></div>
+              <canvas id="spread-open-lines" aria-hidden="true"></canvas>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const TOKEN_KEY = "iq_blitz_control_token";
+      const LAYOUT_KEY = "iq_blitz_spread_layout";
+      const LINK_KEY = "iq_blitz_spread_link";
+      const AFTER_HOURS_KEY = "iq_blitz_spread_after_hours";
+      const OPENS_KEY = "iq_blitz_spread_opens";
+      const PRICE_STYLE_KEY = "iq_blitz_spread_price_style";
+      const RANGE_KEY = "iq_blitz_spread_visible_range";
+      const DRAW_KEY = "iq_blitz_spread_user_lines";
+      const PAPER_LOG_KEY = "iq_blitz_spread_paper_log";
+      const PAPER_PAYOUT_KEY = "iq_blitz_spread_paper_payout";
+      const PAPER_ZMIN_KEY = "iq_blitz_spread_paper_zmin";
+      const PAPER_EDGE_KEY = "iq_blitz_spread_paper_edge";
+      const PAPER_STAKE_KEY = "iq_blitz_spread_paper_stake";
+      const PAPER_RETRIES_KEY = "iq_blitz_spread_paper_retries";
+      const PAPER_SEQ_ON_KEY = "iq_blitz_spread_paper_seq_on";
+      const LINE_COLORS = [
+        "#f472b6",
+        "#34d399",
+        "#60a5fa",
+        "#fbbf24",
+        "#fb7185",
+        "#c084fc",
+        "#2dd4bf",
+      ];
+
+      function getToken() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
+      function setToken(v) {
+        localStorage.setItem(TOKEN_KEY, v);
+      }
+
+      async function api(path, method = "GET", body = null) {
+        const opts = {
+          method,
+          headers: { "X-Control-Token": getToken() },
+        };
+        if (body != null) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
+        }
+        const res = await fetch(path, opts);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = data.detail || res.statusText || "Erro";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        return data;
+      }
+
+      const authBox = document.getElementById("auth-box");
+      const appBox = document.getElementById("app-box");
+      const authErro = document.getElementById("auth-erro");
+      const cmdErro = document.getElementById("cmd-erro");
+      const badge = document.getElementById("run-badge");
+      const btnStart = document.getElementById("btn-start");
+      const btnStop = document.getElementById("btn-stop");
+      const btnOverlay = document.getElementById("btn-overlay");
+      const btnSplit = document.getElementById("btn-split");
+      const btnLink = document.getElementById("btn-link");
+      const btnPriceStyle = document.getElementById("btn-price-style");
+      const btnFit = document.getElementById("btn-fit");
+      const btnAfterHours = document.getElementById("btn-after-hours");
+      const btnOpens = document.getElementById("btn-opens");
+      const overlayWrap = document.getElementById("overlay-wrap");
+      const splitWrap = document.getElementById("split-wrap");
+
+      let layout = localStorage.getItem(LAYOUT_KEY) || "overlay";
+      let linkOn = localStorage.getItem(LINK_KEY) === "1";
+      let showAfterHours = localStorage.getItem(AFTER_HOURS_KEY) !== "0";
+      let showOpens = localStorage.getItem(OPENS_KEY) !== "0";
+      let priceStyle = localStorage.getItem(PRICE_STYLE_KEY) === "line" ? "line" : "candle";
+      let savedTimeRange = null;
+      try {
+        const rawRange = localStorage.getItem(RANGE_KEY);
+        if (rawRange) savedTimeRange = JSON.parse(rawRange);
+      } catch (_) {
+        savedTimeRange = null;
+      }
+      let userAdjustedView = !!savedTimeRange;
+      let restoringRange = false;
+      const rangeBoundCharts = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+      let priceChart = null;
+      let otcChart = null;
+      let euChart = null;
+      let spreadChart = null;
+      let seriesOtc = null;
+      let seriesEu = null;
+      let seriesOtcSplit = null;
+      let seriesEuSplit = null;
+      let seriesSpread = null;
+      let seriesWeekend = null;
+      let lastMeta = "";
+      let eurusdOpens = [];
+      let lastWeekendPoints = [];
+      let lastOpenMarkers = [];
+      let openLinesBound = false;
+      let chartLinkBound = false;
+      let syncingCharts = false;
+      let lastOtcCandles = [];
+      let lastEuCandles = [];
+      let lastSpreadPoints = [];
+      let userLines = { price: [], spread: [] };
+      try {
+        const rawDraw = localStorage.getItem(DRAW_KEY);
+        if (rawDraw) {
+          const parsed = JSON.parse(rawDraw);
+          if (parsed && typeof parsed === "object") {
+            userLines = {
+              price: Array.isArray(parsed.price) ? parsed.price : [],
+              spread: Array.isArray(parsed.spread) ? parsed.spread : [],
+            };
+          }
+        }
+      } catch (_) {
+        userLines = { price: [], spread: [] };
+      }
+      let nextLineId =
+        Math.max(
+          0,
+          ...userLines.price.map((l) => l.id || 0),
+          ...userLines.spread.map((l) => l.id || 0)
+        ) + 1;
+      let drawMode = { price: null, spread: null };
+      let trendPending = { price: null, spread: null };
+      let drawRuntime = { price: [], spread: [] };
+      const drawClickBound =
+        typeof WeakSet !== "undefined" ? new WeakSet() : null;      function showAuth(err) {
+        authBox.hidden = false;
+        appBox.hidden = true;
+        if (err) {
+          authErro.hidden = false;
+          authErro.textContent = err;
+        } else authErro.hidden = true;
+      }
+      function showApp() {
+        authBox.hidden = true;
+        appBox.hidden = false;
+        authErro.hidden = true;
+      }
+      function setCmdErro(msg) {
+        if (!msg) {
+          cmdErro.hidden = true;
+          cmdErro.textContent = "";
+          return;
+        }
+        cmdErro.hidden = false;
+        cmdErro.textContent = msg;
+      }
+
+      function toCandle(rows) {
+        const out = [];
+        for (const r of rows || []) {
+          const ms = Date.parse(r.opened_at);
+          if (Number.isNaN(ms)) continue;
+          out.push({
+            time: Math.floor(ms / 1000),
+            open: +r.open,
+            high: +r.high,
+            low: +r.low,
+            close: +r.close,
+          });
+        }
+        out.sort((a, b) => a.time - b.time);
+        return out;
+      }
+
+      function chartOpts(el) {
+        const w = Math.max(el.clientWidth || 600, 100);
+        const h = Math.max(el.clientHeight || 280, 160);
+        return {
+          autoSize: false,
+          width: w,
+          height: h,
+          layout: { background: { color: "#0a1220" }, textColor: "#94a3b8" },
+          grid: {
+            vertLines: { color: "rgba(34,211,238,0.08)" },
+            horzLines: { color: "rgba(34,211,238,0.08)" },
+          },
+          rightPriceScale: { borderColor: "rgba(34,211,238,0.25)" },
+          timeScale: { borderColor: "rgba(34,211,238,0.25)", timeVisible: true },
+        };
+      }
+
+      function priceFmt() {
+        return { type: "price", precision: 5, minMove: 0.00001 };
+      }
+
+      function addPriceSeries(chart, up, down) {
+        if (priceStyle === "line") {
+          return chart.addLineSeries({
+            color: up,
+            lineWidth: 2,
+            priceFormat: priceFmt(),
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+        }
+        return chart.addCandlestickSeries({
+          upColor: up,
+          downColor: down,
+          borderUpColor: up,
+          borderDownColor: down,
+          wickUpColor: up,
+          wickDownColor: down,
+          priceFormat: priceFmt(),
+        });
+      }
+
+      function toLineData(candles) {
+        return (candles || []).map((c) => ({ time: c.time, value: c.close }));
+      }
+
+      function priceData(candles) {
+        return priceStyle === "line" ? toLineData(candles) : candles || [];
+      }
+
+      function removeSeriesSafe(chart, series) {
+        if (!chart || !series) return;
+        try {
+          chart.removeSeries(series);
+        } catch (_) {}
+      }
+
+      function applyPriceData() {
+        if (seriesOtc) seriesOtc.setData(priceData(lastOtcCandles));
+        if (seriesEu) seriesEu.setData(priceData(lastEuCandles));
+        if (seriesOtcSplit) seriesOtcSplit.setData(priceData(lastOtcCandles));
+        if (seriesEuSplit) seriesEuSplit.setData(priceData(lastEuCandles));
+      }
+
+      function recreatePriceSeries() {
+        restoringRange = true;
+        try {
+          if (priceChart) {
+            removeSeriesSafe(priceChart, seriesOtc);
+            removeSeriesSafe(priceChart, seriesEu);
+            seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
+            seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
+          }
+          if (otcChart) {
+            removeSeriesSafe(otcChart, seriesOtcSplit);
+            seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
+          }
+          if (euChart) {
+            removeSeriesSafe(euChart, seriesEuSplit);
+            seriesEuSplit = addPriceSeries(euChart, "#fbbf24", "#d97706");
+          }
+          applyPriceData();
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function primaryTimeChart() {
+        if (layout === "overlay" && priceChart) return priceChart;
+        if (layout === "split" && otcChart) return otcChart;
+        return priceChart || spreadChart;
+      }
+
+      function captureVisibleRange() {
+        if (restoringRange) return;
+        const chart = primaryTimeChart();
+        if (!chart) return;
+        try {
+          const r = chart.timeScale().getVisibleRange();
+          if (r && r.from != null && r.to != null) {
+            savedTimeRange = { from: r.from, to: r.to };
+            userAdjustedView = true;
+            localStorage.setItem(RANGE_KEY, JSON.stringify(savedTimeRange));
+          }
+        } catch (_) {}
+      }
+
+      function restoreVisibleRange() {
+        if (!savedTimeRange || savedTimeRange.from == null || savedTimeRange.to == null) {
+          return false;
+        }
+        restoringRange = true;
+        let ok = false;
+        try {
+          for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+            if (!c) continue;
+            try {
+              c.timeScale().setVisibleRange(savedTimeRange);
+              ok = true;
+            } catch (_) {}
+          }
+          if (ok) drawEurusdOpenLines();
+          return ok;
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function fitAll(resetSaved) {
+        restoringRange = true;
+        try {
+          for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+            if (!c) continue;
+            try {
+              c.timeScale().fitContent();
+            } catch (_) {}
+          }
+          if (resetSaved) {
+            userAdjustedView = false;
+            savedTimeRange = null;
+            try {
+              localStorage.removeItem(RANGE_KEY);
+            } catch (_) {}
+          }
+          drawEurusdOpenLines();
+        } finally {
+          restoringRange = false;
+        }
+      }
+
+      function applyVisibleRangeOrFit() {
+        if (userAdjustedView && restoreVisibleRange()) return;
+        fitAll(false);
+      }
+
+      function bindRangePersistence() {
+        for (const c of [priceChart, otcChart, euChart, spreadChart]) {
+          if (!c) continue;
+          if (rangeBoundCharts && rangeBoundCharts.has(c)) continue;
+          if (rangeBoundCharts) rangeBoundCharts.add(c);
+          const onChange = () => {
+            if (restoringRange) return;
+            captureVisibleRange();
+          };
+          try {
+            if (typeof c.timeScale().subscribeVisibleTimeRangeChange === "function") {
+              c.timeScale().subscribeVisibleTimeRangeChange(onChange);
+            } else {
+              c.timeScale().subscribeVisibleLogicalRangeChange(onChange);
+            }
+          } catch (_) {
+            try {
+              c.timeScale().subscribeVisibleLogicalRangeChange(onChange);
+            } catch (__) {}
+          }
+        }
+      }
+
+      function syncPriceStyleButton() {
+        if (!btnPriceStyle) return;
+        btnPriceStyle.classList.add("active");
+        btnPriceStyle.textContent = priceStyle === "line" ? "Linha" : "Candles";
+      }
+
+      function setPriceStyle(style) {
+        priceStyle = style === "line" ? "line" : "candle";
+        localStorage.setItem(PRICE_STYLE_KEY, priceStyle);
+        syncPriceStyleButton();
+        recreatePriceSeries();
+        remountUserLines("price");
+        applyVisibleRangeOrFit();
+      }
+
+      function saveUserLines() {
+        try {
+          localStorage.setItem(DRAW_KEY, JSON.stringify(userLines));
+        } catch (_) {}
+      }
+
+      function formatLinePrice(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return "";
+        const abs = Math.abs(n);
+        if (abs >= 1) return n.toFixed(5);
+        if (abs >= 0.01) return n.toFixed(5);
+        return n.toFixed(6);
+      }
+
+      function nextLineColor(scope) {
+        return LINE_COLORS[userLines[scope].length % LINE_COLORS.length];
+      }
+
+      function setDrawHint(scope, text) {
+        const el = document.getElementById(
+          scope === "spread" ? "draw-hint-spread" : "draw-hint-price"
+        );
+        if (el) el.textContent = text || "";
+      }
+
+      function syncDrawButtons(scope) {
+        const prefix = scope === "spread" ? "spread" : "price";
+        const mode = drawMode[scope];
+        const btnH = document.getElementById("btn-draw-" + prefix + "-h");
+        const btnT = document.getElementById("btn-draw-" + prefix + "-trend");
+        const btnE = document.getElementById("btn-draw-" + prefix + "-erase");
+        if (btnH) btnH.classList.toggle("active", mode === "h");
+        if (btnT) btnT.classList.toggle("active", mode === "trend");
+        if (btnE) btnE.classList.toggle("active", mode === "erase");
+        updateDrawCursor();
+      }
+
+      function updateDrawCursor() {
+        const priceOn = !!drawMode.price;
+        const spreadOn = !!drawMode.spread;
+        for (const id of ["price-chart", "otc-chart", "eu-chart"]) {
+          const el = document.getElementById(id);
+          if (el) el.classList.toggle("drawing", priceOn);
+        }
+        const sw = document.getElementById("spread-chart-wrap");
+        if (sw) sw.classList.toggle("drawing", spreadOn);
+        const sc = document.getElementById("spread-chart");
+        if (sc) sc.classList.toggle("drawing", spreadOn);
+      }
+
+      function setDrawMode(scope, mode) {
+        const next = drawMode[scope] === mode ? null : mode;
+        drawMode[scope] = next;
+        trendPending[scope] = null;
+        if (!next) {
+          setDrawHint(scope, "");
+        } else if (next === "h") {
+          setDrawHint(scope, "Clique no gráfico para inserir linha horizontal");
+        } else if (next === "trend") {
+          setDrawHint(scope, "Clique o 1º ponto da tendência");
+        } else if (next === "erase") {
+          setDrawHint(scope, "Clique perto de uma linha para apagar");
+        }
+        syncDrawButtons(scope);
+      }
+
+      function priceSeriesForChart(chart) {
+        if (chart === priceChart) return seriesOtc;
+        if (chart === otcChart) return seriesOtcSplit;
+        if (chart === euChart) return seriesEuSplit;
+        if (chart === spreadChart) return seriesSpread;
+        return null;
+      }
+
+      function priceDrawTargets() {
+        if (layout === "split") {
+          return [
+            { chart: otcChart, series: seriesOtcSplit },
+            { chart: euChart, series: seriesEuSplit },
+          ].filter((t) => t.chart && t.series);
+        }
+        return seriesOtc && priceChart
+          ? [{ chart: priceChart, series: seriesOtc }]
+          : [];
+      }
+
+      function clearDrawRuntime(scope) {
+        for (const item of drawRuntime[scope] || []) {
+          for (const h of item.handles || []) {
+            try {
+              if (h.priceLine && h.series && typeof h.series.removePriceLine === "function") {
+                h.series.removePriceLine(h.priceLine);
+              }
+            } catch (_) {}
+            try {
+              if (h.lineSeries && h.chart) {
+                h.chart.removeSeries(h.lineSeries);
+              }
+            } catch (_) {}
+          }
+        }
+        drawRuntime[scope] = [];
+      }
+
+      function mountHLine(scope, def) {
+        const handles = [];
+        const opts = {
+          price: def.price,
+          color: def.color,
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: formatLinePrice(def.price),
+        };
+        const targets =
+          scope === "spread"
+            ? seriesSpread && spreadChart
+              ? [{ chart: spreadChart, series: seriesSpread }]
+              : []
+            : priceDrawTargets();
+        for (const t of targets) {
+          try {
+            const pl = t.series.createPriceLine(opts);
+            handles.push({ chart: t.chart, series: t.series, priceLine: pl });
+          } catch (_) {}
+        }
+        drawRuntime[scope].push({ id: def.id, type: "h", handles });
+      }
+
+      function mountTrend(scope, def) {
+        const a = { time: def.t1, value: def.p1 };
+        const b = { time: def.t2, value: def.p2 };
+        if (a.time == null || b.time == null) return;
+        const pts = a.time <= b.time ? [a, b] : [b, a];
+        const handles = [];
+        const targets =
+          scope === "spread"
+            ? spreadChart
+              ? [{ chart: spreadChart }]
+              : []
+            : layout === "split"
+              ? [
+                  { chart: otcChart },
+                  { chart: euChart },
+                ].filter((t) => t.chart)
+              : priceChart
+                ? [{ chart: priceChart }]
+                : [];
+        for (const t of targets) {
+          try {
+            const ls = t.chart.addLineSeries({
+              color: def.color,
+              lineWidth: 2,
+              priceFormat: priceFmt(),
+              lastValueVisible: false,
+              priceLineVisible: false,
+              crosshairMarkerVisible: false,
+            });
+            ls.setData(pts);
+            handles.push({ chart: t.chart, lineSeries: ls });
+          } catch (_) {}
+        }
+        drawRuntime[scope].push({ id: def.id, type: "trend", handles });
+      }
+
+      function remountUserLines(scope) {
+        clearDrawRuntime(scope);
+        for (const def of userLines[scope] || []) {
+          if (def.type === "h") mountHLine(scope, def);
+          else if (def.type === "trend") mountTrend(scope, def);
+        }
+      }
+
+      function remountAllUserLines() {
+        remountUserLines("price");
+        remountUserLines("spread");
+      }
+
+      function addHLine(scope, price) {
+        const def = {
+          id: nextLineId++,
+          type: "h",
+          price: Number(price),
+          color: nextLineColor(scope),
+        };
+        userLines[scope].push(def);
+        saveUserLines();
+        mountHLine(scope, def);
+      }
+
+      function addTrend(scope, t1, p1, t2, p2) {
+        if (t1 === t2 && p1 === p2) return;
+        const def = {
+          id: nextLineId++,
+          type: "trend",
+          t1: t1,
+          p1: Number(p1),
+          t2: t2,
+          p2: Number(p2),
+          color: nextLineColor(scope),
+        };
+        userLines[scope].push(def);
+        saveUserLines();
+        mountTrend(scope, def);
+      }
+
+      function removeUserLine(scope, id) {
+        userLines[scope] = userLines[scope].filter((l) => l.id !== id);
+        saveUserLines();
+        remountUserLines(scope);
+      }
+
+      function clearUserLines(scope) {
+        userLines[scope] = [];
+        saveUserLines();
+        trendPending[scope] = null;
+        clearDrawRuntime(scope);
+        const mode = drawMode[scope];
+        if (mode === "h") {
+          setDrawHint(scope, "Linhas limpas · clique para inserir linha horizontal");
+        } else if (mode === "trend") {
+          setDrawHint(scope, "Linhas limpas · clique o 1º ponto da tendência");
+        } else if (mode === "erase") {
+          setDrawHint(scope, "Linhas limpas");
+        } else {
+          setDrawHint(scope, "Linhas limpas");
+          setTimeout(() => setDrawHint(scope, ""), 900);
+        }
+      }
+
+      function visiblePriceSpan(series) {
+        try {
+          const top = series.coordinateToPrice(0);
+          const bot = series.coordinateToPrice(200);
+          if (top == null || bot == null) return 0.0005;
+          return Math.max(Math.abs(top - bot), 1e-8);
+        } catch (_) {
+          return 0.0005;
+        }
+      }
+
+      function eraseNearest(scope, chart, series, time, price, point) {
+        const lines = userLines[scope] || [];
+        if (!lines.length) return;
+        const span = visiblePriceSpan(series);
+        const priceTol = span * 0.03;
+        let bestId = null;
+        let bestScore = Infinity;
+
+        for (const def of lines) {
+          if (def.type === "h") {
+            const d = Math.abs(def.price - price);
+            if (d <= priceTol && d < bestScore) {
+              bestScore = d;
+              bestId = def.id;
+            }
+            continue;
+          }
+          if (def.type === "trend" && time != null) {
+            const tMin = Math.min(def.t1, def.t2);
+            const tMax = Math.max(def.t1, def.t2);
+            if (time < tMin - 3600 || time > tMax + 3600) continue;
+            const spanT = tMax - tMin || 1;
+            const u = Math.max(0, Math.min(1, (time - tMin) / spanT));
+            const pAt =
+              def.t1 <= def.t2
+                ? def.p1 + (def.p2 - def.p1) * u
+                : def.p2 + (def.p1 - def.p2) * u;
+            const d = Math.abs(pAt - price);
+            if (d <= priceTol * 1.5 && d < bestScore) {
+              bestScore = d;
+              bestId = def.id;
+            }
+          }
+        }
+
+        if (bestId == null && point && typeof series.priceToCoordinate === "function") {
+          // fallback: distancia em pixels na vertical
+          let bestPx = 14;
+          for (const def of lines) {
+            if (def.type !== "h") continue;
+            try {
+              const y = series.priceToCoordinate(def.price);
+              if (y == null) continue;
+              const d = Math.abs(y - point.y);
+              if (d < bestPx) {
+                bestPx = d;
+                bestId = def.id;
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (bestId != null) removeUserLine(scope, bestId);
+      }
+
+      function resolveClickTime(chart, param) {
+        if (param && param.time != null) {
+          return typeof param.time === "object" ? null : param.time;
+        }
+        if (!param || !param.point) return null;
+        try {
+          const t = chart.timeScale().coordinateToTime(param.point.x);
+          return typeof t === "number" ? t : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function onDrawClick(scope, chart, param) {
+        const mode = drawMode[scope];
+        if (!mode || !param || !param.point) return;
+        const series = priceSeriesForChart(chart);
+        if (!series || typeof series.coordinateToPrice !== "function") return;
+        let price = null;
+        try {
+          price = series.coordinateToPrice(param.point.y);
+        } catch (_) {
+          price = null;
+        }
+        if (price == null || !Number.isFinite(price)) return;
+        const time = resolveClickTime(chart, param);
+
+        if (mode === "h") {
+          addHLine(scope, price);
+          return;
+        }
+        if (mode === "trend") {
+          if (time == null) {
+            setDrawHint(scope, "Clique sobre a área com dados (eixo do tempo)");
+            return;
+          }
+          if (!trendPending[scope]) {
+            trendPending[scope] = { time, price };
+            setDrawHint(scope, "Clique o 2º ponto da tendência");
+          } else {
+            const first = trendPending[scope];
+            trendPending[scope] = null;
+            addTrend(scope, first.time, first.price, time, price);
+            setDrawHint(scope, "Tendência adicionada · clique para outra ou desligue o modo");
+          }
+          return;
+        }
+        if (mode === "erase") {
+          eraseNearest(scope, chart, series, time, price, param.point);
+        }
+      }
+
+      function bindDrawClicks() {
+        const pairs = [
+          { chart: priceChart, scope: "price" },
+          { chart: otcChart, scope: "price" },
+          { chart: euChart, scope: "price" },
+          { chart: spreadChart, scope: "spread" },
+        ];
+        for (const p of pairs) {
+          if (!p.chart) continue;
+          if (drawClickBound && drawClickBound.has(p.chart)) continue;
+          if (drawClickBound) drawClickBound.add(p.chart);
+          p.chart.subscribeClick((param) => onDrawClick(p.scope, p.chart, param));
+        }
+        updateDrawCursor();
+      }
+
+      function ensureCharts() {
+        if (typeof LightweightCharts === "undefined") return false;
+        if (!priceChart) {
+          const el = document.getElementById("price-chart");
+          if (!el) return false;
+          priceChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
+          seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
+        }
+        if (layout === "split") {
+          if (!otcChart) {
+            const el = document.getElementById("otc-chart");
+            if (el) {
+              otcChart = LightweightCharts.createChart(el, chartOpts(el));
+              seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
+            }
+          }
+          if (!euChart) {
+            const el = document.getElementById("eu-chart");
+            if (el) {
+              euChart = LightweightCharts.createChart(el, chartOpts(el));
+              seriesEuSplit = addPriceSeries(euChart, "#fbbf24", "#d97706");
+            }
+          }
+        }
+        if (!spreadChart) {
+          const el = document.getElementById("spread-chart");
+          if (!el) return false;
+          spreadChart = LightweightCharts.createChart(el, chartOpts(el));
+          seriesSpread = spreadChart.addLineSeries({
+            color: "#a78bfa",
+            lineWidth: 2,
+            priceFormat: priceFmt(),
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+          seriesWeekend = spreadChart.addLineSeries({
+            color: "#f43f5e",
+            lineWidth: 2,
+            lineStyle: 2,
+            priceFormat: priceFmt(),
+            lastValueVisible: false,
+            priceLineVisible: false,
+          });
+          seriesSpread.createPriceLine({
+            price: 0,
+            color: "rgba(148,163,184,0.7)",
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: "0",
+          });
+          bindOpenLines();
+        }
+        bindChartLink();
+        bindRangePersistence();
+        bindDrawClicks();
+        return true;
+      }
+
+      function visibleCharts() {
+        const list = [];
+        if (layout === "overlay" && priceChart) {
+          list.push({ chart: priceChart, series: seriesOtc, kind: "candle", points: lastOtcCandles });
+        }
+        if (layout === "split") {
+          if (otcChart) {
+            list.push({
+              chart: otcChart,
+              series: seriesOtcSplit,
+              kind: "candle",
+              points: lastOtcCandles,
+            });
+          }
+          if (euChart) {
+            list.push({
+              chart: euChart,
+              series: seriesEuSplit,
+              kind: "candle",
+              points: lastEuCandles,
+            });
+          }
+        }
+        if (spreadChart) {
+          list.push({
+            chart: spreadChart,
+            series: seriesSpread,
+            kind: "line",
+            points: lastSpreadPoints,
+          });
+        }
+        return list;
+      }
+
+      function valueAtTime(points, time, kind) {
+        if (!points || !points.length || time == null) return null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time === time) {
+            return kind === "candle" ? points[i].close : points[i].value;
+          }
+        }
+        let best = null;
+        for (let i = 0; i < points.length; i++) {
+          if (points[i].time <= time) {
+            best = kind === "candle" ? points[i].close : points[i].value;
+          } else break;
+        }
+        return best;
+      }
+
+      function bindChartLink() {
+        if (chartLinkBound) return;
+        const charts = [priceChart, otcChart, euChart, spreadChart].filter(Boolean);
+        if (charts.length < 2) return;
+        chartLinkBound = true;
+
+        const onCrosshair = (srcChart, param) => {
+          if (!linkOn || syncingCharts) return;
+          syncingCharts = true;
+          try {
+            for (const item of visibleCharts()) {
+              if (item.chart === srcChart || !item.series) continue;
+              if (!param || param.time == null) {
+                if (typeof item.chart.clearCrosshairPosition === "function") {
+                  item.chart.clearCrosshairPosition();
+                }
+                continue;
+              }
+              const y = valueAtTime(item.points, param.time, item.kind);
+              if (y == null) continue;
+              if (typeof item.chart.setCrosshairPosition === "function") {
+                item.chart.setCrosshairPosition(y, param.time, item.series);
+              }
+            }
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        const onRange = (srcChart, range) => {
+          if (!linkOn || syncingCharts || !range) return;
+          syncingCharts = true;
+          try {
+            for (const item of visibleCharts()) {
+              if (item.chart === srcChart) continue;
+              try {
+                item.chart.timeScale().setVisibleLogicalRange(range);
+              } catch (_) {}
+            }
+            drawEurusdOpenLines();
+          } finally {
+            syncingCharts = false;
+          }
+        };
+
+        for (const c of charts) {
+          c.subscribeCrosshairMove((param) => onCrosshair(c, param));
+          c.timeScale().subscribeVisibleLogicalRangeChange((range) =>
+            onRange(c, range)
+          );
+        }
+      }
+
+      function syncLinkButton() {
+        if (!btnLink) return;
+        btnLink.classList.toggle("active", linkOn);
+        btnLink.textContent = linkOn ? "Link ON" : "Link off";
+      }
+
+      function setLinkOn(on) {
+        linkOn = !!on;
+        localStorage.setItem(LINK_KEY, linkOn ? "1" : "0");
+        syncLinkButton();
+      }
+
+      function bindOpenLines() {
+        if (openLinesBound || !spreadChart) return;
+        openLinesBound = true;
+        const redraw = () => drawEurusdOpenLines();
+        try {
+          spreadChart.timeScale().subscribeVisibleLogicalRangeChange(redraw);
+        } catch (_) {}
+        try {
+          if (typeof spreadChart.timeScale().subscribeVisibleTimeRangeChange === "function") {
+            spreadChart.timeScale().subscribeVisibleTimeRangeChange(redraw);
+          }
+        } catch (_) {}
+        window.addEventListener("resize", redraw);
+      }
+
+      function drawEurusdOpenLines() {
+        const canvas = document.getElementById("spread-open-lines");
+        const wrap = document.getElementById("spread-chart-wrap");
+        const el = document.getElementById("spread-chart");
+        if (!canvas || !wrap || !spreadChart || !el) return;
+        const w = Math.max(wrap.clientWidth || el.clientWidth || 0, 1);
+        const h = Math.max(wrap.clientHeight || el.clientHeight || 0, 1);
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        if (!showOpens || !eurusdOpens.length) return;
+        const ts = spreadChart.timeScale();
+        ctx.strokeStyle = "rgba(34, 211, 238, 0.85)";
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([5, 4]);
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "rgba(34, 211, 238, 0.95)";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        for (const open of eurusdOpens) {
+          const x = ts.timeToCoordinate(open.time);
+          if (x == null || x < 0 || x > w) continue;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+          ctx.fillText("Abertura", x + 4, 6);
+        }
+        ctx.setLineDash([]);
+      }
+
+      function syncOverlayButtons() {
+        if (btnAfterHours) btnAfterHours.classList.toggle("active", showAfterHours);
+        if (btnOpens) btnOpens.classList.toggle("active", showOpens);
+        const lgWknd = document.getElementById("lg-wknd");
+        const lgOpen = document.getElementById("lg-open");
+        if (lgWknd) lgWknd.style.opacity = showAfterHours ? "1" : "0.35";
+        if (lgOpen) lgOpen.style.opacity = showOpens ? "1" : "0.35";
+      }
+
+      function applySpreadOverlays() {
+        if (seriesWeekend) {
+          seriesWeekend.setData(showAfterHours ? lastWeekendPoints : []);
+        }
+        if (seriesSpread) {
+          try {
+            seriesSpread.setMarkers(showOpens ? lastOpenMarkers : []);
+          } catch (_) {
+            try {
+              seriesSpread.setMarkers([]);
+            } catch (__) {}
+          }
+        }
+        drawEurusdOpenLines();
+        syncOverlayButtons();
+      }
+
+      function setAfterHoursOn(on) {
+        showAfterHours = !!on;
+        localStorage.setItem(AFTER_HOURS_KEY, showAfterHours ? "1" : "0");
+        applySpreadOverlays();
+      }
+
+      function setOpensOn(on) {
+        showOpens = !!on;
+        localStorage.setItem(OPENS_KEY, showOpens ? "1" : "0");
+        applySpreadOverlays();
+      }
+      function resizeAll() {
+        for (const [chart, id] of [
+          [priceChart, "price-chart"],
+          [otcChart, "otc-chart"],
+          [euChart, "eu-chart"],
+          [spreadChart, "spread-chart"],
+        ]) {
+          if (!chart) continue;
+          const el = document.getElementById(id);
+          if (!el || (el.offsetParent === null && id !== "spread-chart")) continue;
+          const w = Math.max(el.clientWidth || 100, 100);
+          const h = Math.max(el.clientHeight || 160, 140);
+          chart.applyOptions({ width: w, height: h });
+        }
+        drawEurusdOpenLines();
+      }
+
+      function syncLayoutButtons() {
+        btnOverlay.classList.toggle("active", layout === "overlay");
+        btnSplit.classList.toggle("active", layout === "split");
+        overlayWrap.classList.toggle("visible", layout === "overlay");
+        splitWrap.classList.toggle("visible", layout === "split");
+        syncLinkButton();
+        syncPriceStyleButton();
+        requestAnimationFrame(() => {
+          resizeAll();
+          applyVisibleRangeOrFit();
+        });
+      }
+
+      function setLayout(mode) {
+        layout = mode === "split" ? "split" : "overlay";
+        localStorage.setItem(LAYOUT_KEY, layout);
+        syncLayoutButtons();
+        // Recria series split se necessario e reaplica dados.
+        if (lastOtcCandles.length || lastEuCandles.length || lastSpreadPoints.length) {
+          ensureCharts();
+          restoringRange = true;
+          try {
+            applyPriceData();
+          } finally {
+            restoringRange = false;
+          }
+          remountUserLines("price");
+          resizeAll();
+          applyVisibleRangeOrFit();
+        }
+      }
+
+      function applySeries(data) {
+        if (!ensureCharts()) {
+          document.getElementById("chart-meta").textContent =
+            "Biblioteca de gráfico indisponível.";
+          return;
+        }
+        const otc = toCandle(data.otc);
+        const eu = toCandle(data.eurusd);
+        lastOtcCandles = otc;
+        lastEuCandles = eu;
+
+        restoringRange = true;
+        try {
+          applyPriceData();
+
+          const weekend = [];
+          for (const p of data.spread || []) {
+            const pt = { time: p.time, value: p.spread };
+            if (p.after_hours || p.weekend || p.mode === "carry") weekend.push(pt);
+          }
+          const allSpread = (data.spread || []).map((p) => ({
+            time: p.time,
+            value: p.spread,
+          }));
+          seriesSpread.setData(allSpread);
+          lastWeekendPoints = weekend;
+          lastSpreadPoints = allSpread;
+
+          eurusdOpens = (data.eurusd_opens || []).map((o) => ({
+            time: o.time,
+          }));
+          // Markers so podem existir em timestamps presentes na serie (senao LWC quebra).
+          const spreadTimeSet = new Set(allSpread.map((p) => p.time));
+          const markers = [];
+          for (const o of eurusdOpens) {
+            let t = o.time;
+            if (!spreadTimeSet.has(t)) {
+              // snap para o ponto de spread mais proximo
+              let best = null;
+              let bestDist = Infinity;
+              for (const p of allSpread) {
+                const d = Math.abs(p.time - t);
+                if (d < bestDist) {
+                  bestDist = d;
+                  best = p.time;
+                }
+              }
+              if (best == null || bestDist > 3600 * 6) continue;
+              t = best;
+            }
+            markers.push({
+              time: t,
+              position: "aboveBar",
+              color: "#22d3ee",
+              shape: "arrowDown",
+              text: "Open",
+            });
+          }
+          lastOpenMarkers = markers;
+          applySpreadOverlays();
+          lastMeta =
+            (data.otc_asset || "OTC") +
+            " · " +
+            otc.length +
+            " velas · " +
+            (data.eurusd_asset || "EURUSD") +
+            " [" +
+            (data.eurusd_source || "?") +
+            "] · " +
+            eu.length +
+            " velas · spread " +
+            allSpread.length +
+            " (" +
+            (data.after_hours_points != null
+              ? data.after_hours_points
+              : data.weekend_points || 0) +
+            " fora do horário · " +
+            eurusdOpens.length +
+            " aberturas)";
+          document.getElementById("chart-meta").textContent = lastMeta;
+          document.getElementById("s-spread").textContent = String(allSpread.length);
+          document.getElementById("s-wknd").textContent = String(
+            data.after_hours_points != null
+              ? data.after_hours_points
+              : data.weekend_points || 0
+          );
+          const opensEl = document.getElementById("s-opens");
+          if (opensEl) opensEl.textContent = String(eurusdOpens.length);
+        } finally {
+          restoringRange = false;
+        }
+
+        resizeAll();
+        applyVisibleRangeOrFit();
+        if (
+          (!drawRuntime.price.length && userLines.price.length) ||
+          (!drawRuntime.spread.length && userLines.spread.length)
+        ) {
+          remountAllUserLines();
+        }
+        requestAnimationFrame(() => {
+          resizeAll();
+          applyVisibleRangeOrFit();
+          drawEurusdOpenLines();
+        });
+      }
+
+      function renderStatus(st) {
+        const eu = st.eurusd || {};
+        const otc = st.otc || {};
+        const running = !!eu.running || !!otc.collector_running;
+        badge.textContent = running ? "COLETANDO" : "STAND-BY";
+        badge.className = "badge " + (running ? "badge-on" : "badge-off");
+        btnStart.disabled = running;
+        btnStop.disabled = !running;
+        document.getElementById("s-phase").textContent =
+          (eu.source ? String(eu.source) + " · " : "") + (eu.phase || "—");
+        document.getElementById("s-eu").textContent =
+          eu.stored_count != null ? String(eu.stored_count) : "—";
+        document.getElementById("s-otc").textContent =
+          otc.stored_count != null ? String(otc.stored_count) : "—";
+        document.getElementById("s-otc-run").textContent = otc.collector_running
+          ? "ligado"
+          : "parado";
+        document.getElementById("s-msg").textContent =
+          eu.message || eu.error || otc.stored_err || "";
+      }
+
+      async function loadCharts() {
+        const data = await api("/api/ohlc-spread-olymp/series?limit=0");
+        applySeries(data);
+        try {
+          await loadOu();
+        } catch (e) {
+          const el = document.getElementById("ou-msg");
+          if (el) el.textContent = "Erro OU: " + (e.message || e);
+        }
+      }
+
+      function fmtNum(v, digits) {
+        if (v == null || !Number.isFinite(Number(v))) return "—";
+        return Number(v).toFixed(digits);
+      }
+
+      function fmtPct(v) {
+        if (v == null || !Number.isFinite(Number(v))) return "—";
+        return (Number(v) * 100).toFixed(1) + "%";
+      }
+
+      function renderOu(payload) {
+        const ou = (payload && payload.ou) || {};
+        const set = (id, text) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = text;
+        };
+        if (!ou.ok) {
+          set("ou-n", ou.n != null ? String(ou.n) : "—");
+          set("ou-mr", "não");
+          set("ou-theta", "—");
+          set("ou-hl", "—");
+          set("ou-sig", "—");
+          set("ou-z", "—");
+          set("ou-x", "—");
+          set("ou-phi", "—");
+          set("ou-p1", "—");
+          set("ou-p2", "—");
+          set("ou-p4", "—");
+          set("ou-pay1", "—");
+          set("ou-pay2", "—");
+          set("ou-pay4", "—");
+          set("ou-bias", "—");
+          set("ou-best", "—");
+          set(
+            "ou-msg",
+            ou.error ||
+              "Sem estimativa OU (preciso de mais pontos paired no spread)."
+          );
+          return;
+        }
+        set("ou-n", String(ou.n ?? "—"));
+        set("ou-mr", ou.mean_reverting ? "sim" : "não");
+        set("ou-theta", fmtNum(ou.theta, 6));
+        set(
+          "ou-hl",
+          ou.half_life_hours != null
+            ? fmtNum(ou.half_life_hours, 2) + " h"
+            : "—"
+        );
+        set("ou-sig", fmtNum(ou.sigma_eq, 6));
+        set("ou-z", fmtNum(ou.z, 2));
+        set("ou-x", fmtNum(ou.x_last, 6));
+        set("ou-phi", fmtNum(ou.phi, 4));
+
+        const h1 = (ou.horizons && ou.horizons["1h"]) || {};
+        const h2 = (ou.horizons && ou.horizons["2h"]) || {};
+        const h4 = (ou.horizons && ou.horizons["4h"]) || {};
+        set("ou-p1", fmtPct(h1.p_reversion));
+        set("ou-p2", fmtPct(h2.p_reversion));
+        set("ou-p4", fmtPct(h4.p_reversion));
+        set(
+          "ou-pay1",
+          h1.min_payout != null ? fmtPct(h1.min_payout) : "—"
+        );
+        set(
+          "ou-pay2",
+          h2.min_payout != null ? fmtPct(h2.min_payout) : "—"
+        );
+        set(
+          "ou-pay4",
+          h4.min_payout != null ? fmtPct(h4.min_payout) : "—"
+        );
+
+        const best = ou.best || null;
+        if (best) {
+          const bias = String(best.otc_bias || "—").toUpperCase();
+          set("ou-bias", bias + " · spread " + (best.side_spread || "—"));
+          set(
+            "ou-best",
+            (best.horizon || "—") + " · " + fmtPct(best.p_reversion)
+          );
+        } else {
+          set("ou-bias", "—");
+          set("ou-best", "—");
+        }
+
+        let msg =
+          "Filtro: " +
+          (ou.filter || "paired") +
+          " · fonte EURUSD: " +
+          (payload.eurusd_source || "?");
+        if (!ou.mean_reverting) {
+          msg +=
+            " · φ fora (0,1): sem mean-reversion confiável — não use p̂ para edge.";
+        } else if (ou.z != null && Math.abs(ou.z) < 1) {
+          msg += " · |z| baixo: spread perto de θ — sinal fraco.";
+        } else if (best && best.p_reversion != null) {
+          msg +=
+            " · compare p̂ com o payout da Olymptrade (precisa p̂ > 1/(1+payout)).";
+        }
+        set("ou-msg", msg);
+      }
+
+      async function loadOu() {
+        const payoutPct = Number(document.getElementById("paper-payout")?.value || 92);
+        const zMin = Number(document.getElementById("paper-zmin")?.value || 1.5);
+        const edgePct = Number(document.getElementById("paper-edge")?.value || 3);
+        const q =
+          "/api/ohlc-spread-olymp/ou?paired_only=true&min_n=48" +
+          "&payout=" +
+          encodeURIComponent(payoutPct / 100) +
+          "&z_min=" +
+          encodeURIComponent(zMin) +
+          "&edge_margin=" +
+          encodeURIComponent(edgePct / 100);
+        const data = await api(q);
+        renderOu(data);
+        renderPaperSignal(data);
+        try {
+          localStorage.setItem(PAPER_PAYOUT_KEY, String(payoutPct));
+          localStorage.setItem(PAPER_ZMIN_KEY, String(zMin));
+          localStorage.setItem(PAPER_EDGE_KEY, String(edgePct));
+        } catch (_) {}
+      }
+
+      let lastPaperSignal = null;
+      let lastPhase3Plan = null;
+
+      function loadPaperLog() {
+        try {
+          const raw = localStorage.getItem(PAPER_LOG_KEY);
+          if (!raw) return [];
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+          return [];
+        }
+      }
+
+      function savePaperLog(rows) {
+        try {
+          localStorage.setItem(PAPER_LOG_KEY, JSON.stringify(rows.slice(0, 500)));
+        } catch (_) {}
+      }
+
+      function paperSeqEnabled() {
+        const el = document.getElementById("paper-seq-on");
+        return el ? !!el.checked : true;
+      }
+
+      function paperMaxRetries() {
+        return Math.max(0, Number(document.getElementById("paper-retries")?.value || 2));
+      }
+
+      function findOpenSequenceTrade(rows) {
+        // Primeiro trade da lista (mais recente) que ainda define a sequencia ativa.
+        for (const r of rows) {
+          if (!r.sequence_id) continue;
+          if (r.result === "PENDING") return r;
+          if (r.result === "LOSS" && paperSeqEnabled()) return r;
+          if (r.result === "WIN" || r.result === "VOID") return null;
+          // LOSS sem fase 3: sequencia morta
+          if (r.result === "LOSS") return null;
+        }
+        return null;
+      }
+
+      function planFlatReentry(signal, previous, maxRetries) {
+        const base = { action: "NONE", max_retries: maxRetries, stake_mode: "flat", reasons: [] };
+        if (!previous) {
+          base.reasons = ["Sem trade anterior na sequencia"];
+          return base;
+        }
+        const result = String(previous.result || "").toUpperCase();
+        const attempt = Number(previous.attempt || 1);
+        const sidePrev = String(previous.otc_side || "").toUpperCase();
+        const seqId = previous.sequence_id;
+        const stake = previous.stake;
+        if (result === "WIN") {
+          return { ...base, action: "CLOSE_WIN", sequence_id: seqId, attempt, reasons: ["Sequencia encerrada no WIN"] };
+        }
+        if (result === "VOID") {
+          return { ...base, action: "CLOSE_VOID", sequence_id: seqId, attempt, reasons: ["Sequencia encerrada (VOID)"] };
+        }
+        if (result !== "LOSS") {
+          return { ...base, action: "WAIT", sequence_id: seqId, attempt, reasons: ["Aguarde resolver W/L do paper pendente"] };
+        }
+        if (attempt >= 1 + maxRetries) {
+          return {
+            ...base,
+            action: "STOP",
+            sequence_id: seqId,
+            attempt,
+            reasons: [`Teto da sequencia: ${attempt}/${1 + maxRetries} tentativas — pare`],
+          };
+        }
+        if (!signal || signal.action !== "GO") {
+          return { ...base, action: "STOP", sequence_id: seqId, attempt, reasons: ["Sinal atual nao e GO — nao reentrar"] };
+        }
+        const sideNow = String(signal.otc_side || "").toUpperCase();
+        if (sideNow !== sidePrev) {
+          return {
+            ...base,
+            action: "STOP",
+            sequence_id: seqId,
+            attempt,
+            reasons: [`Lado mudou (${sidePrev} → ${sideNow}) — nao reentrar`],
+          };
+        }
+        const nextAttempt = attempt + 1;
+        return {
+          action: "REENTRY",
+          max_retries: maxRetries,
+          stake_mode: "flat",
+          sequence_id: seqId,
+          attempt: nextAttempt,
+          otc_side: sideNow,
+          horizon: signal.horizon,
+          hours: signal.hours,
+          p_hat: signal.p_hat,
+          payout: signal.payout,
+          ev: signal.ev,
+          z: signal.z,
+          stake,
+          reasons: [
+            `REENTRY flat #${nextAttempt}/${1 + maxRetries} ${sideNow} ${signal.horizon} (apos LOSS; stake igual)`,
+          ],
+        };
+      }
+
+      function refreshPhase3Plan() {
+        lastPhase3Plan = null;
+        const seqEl = document.getElementById("paper-seq");
+        const p3El = document.getElementById("paper-phase3");
+        const reBtn = document.getElementById("btn-paper-reentry");
+        if (!paperSeqEnabled()) {
+          if (seqEl) seqEl.textContent = "off";
+          if (p3El) p3El.textContent = "desligada";
+          if (reBtn) reBtn.disabled = true;
+          return;
+        }
+        const rows = loadPaperLog();
+        const prev = findOpenSequenceTrade(rows);
+        if (!prev) {
+          if (seqEl) seqEl.textContent = "—";
+          if (p3El) p3El.textContent = "aguardando entrada";
+          if (reBtn) reBtn.disabled = true;
+          return;
+        }
+        const plan = planFlatReentry(lastPaperSignal, prev, paperMaxRetries());
+        lastPhase3Plan = plan;
+        if (seqEl) {
+          seqEl.textContent =
+            String(prev.sequence_id || "").slice(-6) +
+            " · #" +
+            (prev.attempt || 1);
+        }
+        if (p3El) p3El.textContent = plan.action || "—";
+        if (reBtn) reBtn.disabled = plan.action !== "REENTRY";
+        if (plan.action === "REENTRY" || plan.action === "STOP") {
+          const msg = document.getElementById("paper-msg");
+          const extra = Array.isArray(plan.reasons) ? plan.reasons.join(" · ") : "";
+          if (msg && extra) {
+            const base = msg.textContent && !msg.textContent.includes("REENTRY") && !msg.textContent.includes("Teto")
+              ? msg.textContent + " · "
+              : "";
+            if (plan.action === "REENTRY" || plan.action === "STOP") {
+              msg.textContent = (msg.dataset.sigMsg || base) + extra;
+            }
+          }
+        }
+      }
+
+      function paperStats(rows) {
+        let wins = 0;
+        let losses = 0;
+        let pnl = 0;
+        for (const r of rows) {
+          if (r.result === "WIN") {
+            wins += 1;
+            pnl += Number(r.stake || 0) * Number(r.payout || 0);
+          } else if (r.result === "LOSS") {
+            losses += 1;
+            pnl -= Number(r.stake || 0);
+          }
+        }
+        const done = wins + losses;
+        const wr = done ? wins / done : null;
+        return { wins, losses, done, wr, pnl };
+      }
+
+      function renderPaperTable() {
+        const tbody = document.getElementById("paper-tbody");
+        if (!tbody) return;
+        const rows = loadPaperLog();
+        const st = paperStats(rows);
+        const pnlEl = document.getElementById("paper-pnl");
+        if (pnlEl) {
+          pnlEl.textContent =
+            st.done === 0
+              ? "—"
+              : (st.pnl >= 0 ? "+" : "") +
+                st.pnl.toFixed(2) +
+                " · " +
+                st.wins +
+                "W/" +
+                st.losses +
+                "L" +
+                (st.wr != null ? " · WR " + (st.wr * 100).toFixed(0) + "%" : "");
+        }
+        tbody.innerHTML = "";
+        for (const r of rows) {
+          const tr = document.createElement("tr");
+          tr.style.borderBottom = "1px solid rgba(148,163,184,0.12)";
+          const when = r.ts
+            ? new Date(r.ts).toLocaleString("pt-BR", { hour12: false })
+            : "—";
+          const resultCell =
+            r.result === "PENDING"
+              ? `<button type="button" class="btn btn-mode" data-paper-win="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">W</button>
+                 <button type="button" class="btn btn-mode" data-paper-loss="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">L</button>
+                 <button type="button" class="btn btn-mode" data-paper-void="${r.id}" style="padding:0.15rem 0.4rem;font-size:0.72rem">∅</button>`
+              : String(r.result || "—");
+          const seqShort = r.sequence_id
+            ? String(r.sequence_id).slice(-6)
+            : "—";
+          tr.innerHTML =
+            `<td style="padding:0.35rem;white-space:nowrap">${when}</td>` +
+            `<td>${seqShort}</td>` +
+            `<td>${r.attempt != null ? r.attempt : "—"}</td>` +
+            `<td>${r.kind || r.action || "—"}</td>` +
+            `<td>${r.otc_side || "—"}</td>` +
+            `<td>${r.horizon || "—"}</td>` +
+            `<td>${r.p_hat != null ? (Number(r.p_hat) * 100).toFixed(1) + "%" : "—"}</td>` +
+            `<td>${r.payout != null ? (Number(r.payout) * 100).toFixed(0) + "%" : "—"}</td>` +
+            `<td>${r.stake != null ? r.stake : "—"}</td>` +
+            `<td>${r.z != null ? Number(r.z).toFixed(2) : "—"}</td>` +
+            `<td>${resultCell}</td>`;
+          tbody.appendChild(tr);
+        }
+        tbody.querySelectorAll("[data-paper-win]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-win"), "WIN"));
+        });
+        tbody.querySelectorAll("[data-paper-loss]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-loss"), "LOSS"));
+        });
+        tbody.querySelectorAll("[data-paper-void]").forEach((btn) => {
+          btn.addEventListener("click", () => setPaperResult(btn.getAttribute("data-paper-void"), "VOID"));
+        });
+        refreshPhase3Plan();
+      }
+
+      function setPaperResult(id, result) {
+        const rows = loadPaperLog();
+        const i = rows.findIndex((r) => String(r.id) === String(id));
+        if (i < 0) return;
+        rows[i].result = result;
+        rows[i].resolved_at = Date.now();
+        savePaperLog(rows);
+        renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (result === "LOSS" && paperSeqEnabled()) {
+          refreshPhase3Plan();
+          if (lastPhase3Plan && lastPhase3Plan.action === "REENTRY" && msg) {
+            msg.textContent = (lastPhase3Plan.reasons || []).join(" · ");
+          } else if (lastPhase3Plan && lastPhase3Plan.action === "STOP" && msg) {
+            msg.textContent = (lastPhase3Plan.reasons || []).join(" · ");
+          }
+        }
+      }
+
+      function renderPaperSignal(payload) {
+        const sig = (payload && payload.signal) || {};
+        lastPaperSignal = sig;
+        const set = (id, text) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = text;
+        };
+        const action = sig.action || "SKIP";
+        set("paper-action", action);
+        const actionEl = document.getElementById("paper-action");
+        if (actionEl) {
+          actionEl.style.color = action === "GO" ? "#34d399" : "#f87171";
+        }
+        set("paper-side", sig.otc_side || "—");
+        set("paper-horizon", sig.horizon || "—");
+        set("paper-phat", fmtPct(sig.p_hat));
+        set("paper-pneed", fmtPct(sig.p_need));
+        set(
+          "paper-ev",
+          sig.ev != null && Number.isFinite(Number(sig.ev))
+            ? (Number(sig.ev) >= 0 ? "+" : "") + Number(sig.ev).toFixed(3)
+            : "—"
+        );
+        set("paper-z", fmtNum(sig.z, 2));
+        const reasons = Array.isArray(sig.reasons) ? sig.reasons.join(" · ") : "";
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.dataset.sigMsg = reasons || "";
+          msg.textContent = reasons || "—";
+        }
+        const logBtn = document.getElementById("btn-paper-log");
+        if (logBtn) logBtn.disabled = action !== "GO";
+        refreshPhase3Plan();
+      }
+
+      function registerPaperTrade() {
+        if (!lastPaperSignal || lastPaperSignal.action !== "GO") return;
+        const stake = Number(document.getElementById("paper-stake")?.value || 100);
+        try {
+          localStorage.setItem(PAPER_STAKE_KEY, String(stake));
+        } catch (_) {}
+        const rows = loadPaperLog();
+        const seqId = "seq-" + Date.now();
+        rows.unshift({
+          id: String(Date.now()) + "-" + Math.floor(Math.random() * 1e6),
+          ts: Date.now(),
+          action: "GO",
+          kind: "ENTRY",
+          sequence_id: seqId,
+          attempt: 1,
+          otc_side: lastPaperSignal.otc_side,
+          horizon: lastPaperSignal.horizon,
+          hours: lastPaperSignal.hours,
+          p_hat: lastPaperSignal.p_hat,
+          payout: lastPaperSignal.payout,
+          ev: lastPaperSignal.ev,
+          z: lastPaperSignal.z,
+          stake: stake,
+          result: "PENDING",
+        });
+        savePaperLog(rows);
+        renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.textContent =
+            "Paper ENTRY #1: " +
+            lastPaperSignal.otc_side +
+            " " +
+            lastPaperSignal.horizon +
+            " · marque W/L no expiry.";
+        }
+      }
+
+      function registerPaperReentry() {
+        if (!lastPhase3Plan || lastPhase3Plan.action !== "REENTRY") return;
+        if (!lastPaperSignal || lastPaperSignal.action !== "GO") return;
+        const stake = Number(
+          lastPhase3Plan.stake != null
+            ? lastPhase3Plan.stake
+            : document.getElementById("paper-stake")?.value || 100
+        );
+        const rows = loadPaperLog();
+        rows.unshift({
+          id: String(Date.now()) + "-" + Math.floor(Math.random() * 1e6),
+          ts: Date.now(),
+          action: "GO",
+          kind: "REENTRY",
+          sequence_id: lastPhase3Plan.sequence_id,
+          attempt: lastPhase3Plan.attempt,
+          otc_side: lastPhase3Plan.otc_side || lastPaperSignal.otc_side,
+          horizon: lastPhase3Plan.horizon || lastPaperSignal.horizon,
+          hours: lastPhase3Plan.hours || lastPaperSignal.hours,
+          p_hat: lastPhase3Plan.p_hat != null ? lastPhase3Plan.p_hat : lastPaperSignal.p_hat,
+          payout: lastPhase3Plan.payout != null ? lastPhase3Plan.payout : lastPaperSignal.payout,
+          ev: lastPhase3Plan.ev != null ? lastPhase3Plan.ev : lastPaperSignal.ev,
+          z: lastPhase3Plan.z != null ? lastPhase3Plan.z : lastPaperSignal.z,
+          stake: stake,
+          result: "PENDING",
+        });
+        savePaperLog(rows);
+        renderPaperTable();
+        const msg = document.getElementById("paper-msg");
+        if (msg) {
+          msg.textContent =
+            "Paper REENTRY #" +
+            lastPhase3Plan.attempt +
+            ": " +
+            (lastPhase3Plan.otc_side || "") +
+            " " +
+            (lastPhase3Plan.horizon || "") +
+            " · stake flat " +
+            stake;
+        }
+      }
+
+      function exportPaperCsv() {
+        const rows = loadPaperLog();
+        const header = [
+          "ts_iso",
+          "sequence_id",
+          "attempt",
+          "kind",
+          "action",
+          "otc_side",
+          "horizon",
+          "p_hat",
+          "payout",
+          "stake",
+          "z",
+          "ev",
+          "result",
+        ];
+        const lines = [header.join(",")];
+        for (const r of rows) {
+          lines.push(
+            [
+              r.ts ? new Date(r.ts).toISOString() : "",
+              r.sequence_id || "",
+              r.attempt != null ? r.attempt : "",
+              r.kind || "",
+              r.action || "",
+              r.otc_side || "",
+              r.horizon || "",
+              r.p_hat != null ? r.p_hat : "",
+              r.payout != null ? r.payout : "",
+              r.stake != null ? r.stake : "",
+              r.z != null ? r.z : "",
+              r.ev != null ? r.ev : "",
+              r.result || "",
+            ].join(",")
+          );
+        }
+        const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "paper_ou_trades.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      async function refresh() {
+        const st = await api("/api/ohlc-spread-olymp/status");
+        renderStatus(st);
+        try {
+          await loadCharts();
+        } catch (e) {
+          document.getElementById("chart-meta").textContent =
+            "Erro ao carregar gráficos: " + (e.message || e);
+          setCmdErro(e.message || String(e));
+        }
+        return st;
+      }
+
+      btnOverlay.addEventListener("click", () => setLayout("overlay"));
+      btnSplit.addEventListener("click", () => setLayout("split"));
+      if (btnLink) btnLink.addEventListener("click", () => setLinkOn(!linkOn));
+      if (btnPriceStyle) {
+        btnPriceStyle.addEventListener("click", () =>
+          setPriceStyle(priceStyle === "line" ? "candle" : "line")
+        );
+      }
+      if (btnFit) {
+        btnFit.addEventListener("click", () => fitAll(true));
+      }
+      if (btnAfterHours) {
+        btnAfterHours.addEventListener("click", () =>
+          setAfterHoursOn(!showAfterHours)
+        );
+      }
+      if (btnOpens) {
+        btnOpens.addEventListener("click", () => setOpensOn(!showOpens));
+      }
+      function wireDrawControls(scope) {
+        const prefix = scope === "spread" ? "spread" : "price";
+        const btnH = document.getElementById("btn-draw-" + prefix + "-h");
+        const btnT = document.getElementById("btn-draw-" + prefix + "-trend");
+        const btnE = document.getElementById("btn-draw-" + prefix + "-erase");
+        const btnC = document.getElementById("btn-draw-" + prefix + "-clear");
+        if (btnH) btnH.addEventListener("click", () => setDrawMode(scope, "h"));
+        if (btnT) btnT.addEventListener("click", () => setDrawMode(scope, "trend"));
+        if (btnE) btnE.addEventListener("click", () => setDrawMode(scope, "erase"));
+        if (btnC) btnC.addEventListener("click", () => clearUserLines(scope));
+        syncDrawButtons(scope);
+      }
+      wireDrawControls("price");
+      wireDrawControls("spread");
+      syncOverlayButtons();
+      syncPriceStyleButton();
+
+      (function initPaperControls() {
+        const payoutEl = document.getElementById("paper-payout");
+        const zEl = document.getElementById("paper-zmin");
+        const edgeEl = document.getElementById("paper-edge");
+        const stakeEl = document.getElementById("paper-stake");
+        const retriesEl = document.getElementById("paper-retries");
+        const seqOnEl = document.getElementById("paper-seq-on");
+        try {
+          if (payoutEl && localStorage.getItem(PAPER_PAYOUT_KEY)) {
+            payoutEl.value = localStorage.getItem(PAPER_PAYOUT_KEY);
+          }
+          if (zEl && localStorage.getItem(PAPER_ZMIN_KEY)) {
+            zEl.value = localStorage.getItem(PAPER_ZMIN_KEY);
+          }
+          if (edgeEl && localStorage.getItem(PAPER_EDGE_KEY)) {
+            edgeEl.value = localStorage.getItem(PAPER_EDGE_KEY);
+          }
+          if (stakeEl && localStorage.getItem(PAPER_STAKE_KEY)) {
+            stakeEl.value = localStorage.getItem(PAPER_STAKE_KEY);
+          }
+          if (retriesEl && localStorage.getItem(PAPER_RETRIES_KEY)) {
+            retriesEl.value = localStorage.getItem(PAPER_RETRIES_KEY);
+          }
+          if (seqOnEl && localStorage.getItem(PAPER_SEQ_ON_KEY) != null) {
+            seqOnEl.checked = localStorage.getItem(PAPER_SEQ_ON_KEY) === "1";
+          }
+        } catch (_) {}
+        const persistSeqPrefs = () => {
+          try {
+            if (retriesEl) localStorage.setItem(PAPER_RETRIES_KEY, String(retriesEl.value));
+            if (seqOnEl) localStorage.setItem(PAPER_SEQ_ON_KEY, seqOnEl.checked ? "1" : "0");
+          } catch (_) {}
+          refreshPhase3Plan();
+        };
+        if (retriesEl) retriesEl.addEventListener("change", persistSeqPrefs);
+        if (seqOnEl) seqOnEl.addEventListener("change", persistSeqPrefs);
+        const btnRef = document.getElementById("btn-paper-refresh");
+        if (btnRef) {
+          btnRef.addEventListener("click", async () => {
+            try {
+              await loadOu();
+              setCmdErro("");
+            } catch (e) {
+              setCmdErro(e.message || String(e));
+            }
+          });
+        }
+        const btnLog = document.getElementById("btn-paper-log");
+        if (btnLog) btnLog.addEventListener("click", () => registerPaperTrade());
+        const btnRe = document.getElementById("btn-paper-reentry");
+        if (btnRe) btnRe.addEventListener("click", () => registerPaperReentry());
+        const btnExp = document.getElementById("btn-paper-export");
+        if (btnExp) btnExp.addEventListener("click", () => exportPaperCsv());
+        const btnClr = document.getElementById("btn-paper-clear");
+        if (btnClr) {
+          btnClr.addEventListener("click", () => {
+            if (!confirm("Limpar todo o log paper deste navegador?")) return;
+            savePaperLog([]);
+            renderPaperTable();
+          });
+        }
+        renderPaperTable();
+      })();
+
+      document.getElementById("token-save").addEventListener("click", async () => {
+        setToken(document.getElementById("token-input").value.trim());
+        try {
+          showApp();
+          syncLayoutButtons();
+          await refresh();
+          setCmdErro("");
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      });
+
+      btnStart.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc-spread-olymp/start", "POST", {
+            asset: "EURUSD",
+          });
+          renderStatus(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      btnStop.addEventListener("click", async () => {
+        try {
+          const st = await api("/api/ohlc-spread-olymp/stop", "POST");
+          renderStatus(st);
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-pull").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Sincronizando OTC (Olymptrade) + EURUSD (Dukascopy)…";
+          const st = await api("/api/ohlc-spread-olymp/pull-now", "POST", { days: 14 });
+          renderStatus(st);
+          const sync = st.sync || {};
+          const otcN = (sync.otc || {}).upserted;
+          const euN = (sync.eurusd || {}).upserted;
+          document.getElementById("s-msg").textContent =
+            `Sync ok · OTC +${otcN ?? "?"} · Dukascopy +${euN ?? "?"}`;
+          await loadCharts();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-otc-history").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Puxando histórico OTC da Olymptrade (paginado, até ~600 dias / fim de 2024)… pode demorar alguns minutos.";
+          const st = await api("/api/ohlc-spread-olymp/backfill-otc", "POST", {
+            days: 600,
+            asset: "EURUSD_otc_olymp",
+          });
+          renderStatus(st);
+          const bf = st.backfill_otc || {};
+          document.getElementById("s-msg").textContent =
+            `Histórico OTC: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.pages != null ? ` · ${bf.pages} páginas` : "") +
+            (bf.oldest ? ` · ${bf.oldest} → ${bf.newest || "?"}` : "") +
+            (bf.stored_oldest ? ` · mais antigo salvo: ${bf.stored_oldest}` : "");
+          await loadCharts();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-duka-history").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Puxando Dukascopy recente (incremental desde o último salvo)…";
+          const st = await api("/api/ohlc-spread-olymp/backfill-dukascopy", "POST", {
+            days: 14,
+            match_otc: false,
+            otc_asset: "EURUSD_otc_olymp",
+          });
+          renderStatus(st);
+          const bf = st.backfill_dukascopy || {};
+          document.getElementById("s-msg").textContent =
+            `Dukascopy recente: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.mode ? ` · ${bf.mode}` : "") +
+            (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
+            (bf.from ? ` · ${bf.from} → ${bf.to || "?"}` : "") +
+            (bf.newest ? ` · até ${bf.newest}` : "");
+          await loadCharts();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-download").addEventListener("click", async () => {
+        try {
+          setCmdErro("");
+          document.getElementById("s-msg").textContent =
+            "Baixando: sincroniza Olymptrade + Dukascopy e gera ZIP…";
+          const res = await fetch("/api/ohlc-spread-olymp/export?days=14&sync=1", {
+            headers: { "X-Control-Token": getToken() },
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            const detail = data.detail || res.statusText || "Erro no download";
+            throw new Error(
+              typeof detail === "string" ? detail : JSON.stringify(detail)
+            );
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "ohlc_spread_otc_dukascopy.zip";
+          a.click();
+          URL.revokeObjectURL(url);
+          document.getElementById("s-msg").textContent =
+            "Download concluído (ZIP com OTC + EURUSD Dukascopy).";
+          await refresh();
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-reload").addEventListener("click", async () => {
+        try {
+          await loadCharts();
+          setCmdErro("");
+        } catch (e) {
+          setCmdErro(e.message || String(e));
+        }
+      });
+
+      window.addEventListener("resize", resizeAll);
+      if (typeof ResizeObserver !== "undefined") {
+        const priceEl = document.getElementById("price-chart");
+        if (priceEl?.parentElement) {
+          new ResizeObserver(() => resizeAll()).observe(priceEl.parentElement);
+        }
+      }
+
+      (async () => {
+        const t = getToken();
+        if (t) document.getElementById("token-input").value = t;
+        if (!t) {
+          showAuth();
+          return;
+        }
+        try {
+          showApp();
+          syncLayoutButtons();
+          // Espera o painel ganhar largura antes de criar os charts.
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          await refresh();
+        } catch (e) {
+          showAuth(e.message || String(e));
+        }
+      })();
+
+      setInterval(() => {
+        if (appBox.hidden) return;
+        refresh().catch(() => {});
+      }, 15000);
+    </script>
+  </body>
+</html>
