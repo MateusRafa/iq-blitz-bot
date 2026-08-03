@@ -16,11 +16,13 @@ from pydantic import BaseModel, Field
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
+from bot.ohlc_collector_olymp import collector_olymp
 from bot.ohlc_spread import (
     build_spread_1h,
     detect_eurusd_opens,
     pad_eurusd_tail_to_otc,
 )
+from bot.ohlc_spread_olymp_sync import sync_spread_olymp_sources
 from bot.ohlc_spread_sync import sync_spread_sources
 from bot.ohlc_store import (
     candles_to_csv,
@@ -28,6 +30,8 @@ from bot.ohlc_store import (
     fetch_candles_range,
     stored_summary,
 )
+from bot.olymptrade_fetch import default_store_asset as olymp_default_otc_asset
+from bot.olymptrade_fetch import olymptrade_available
 from bot.runner import MIN_DURATION, normalize_asset, runner
 from bot.spread_ou import analyze_spread_ou, evaluate_paper_signal
 
@@ -133,6 +137,11 @@ def ohlc_spread_page() -> FileResponse:
     return _html_page("ohlc_spread.html")
 
 
+@app.get("/ohlc-spread-olymp")
+def ohlc_spread_olymp_page() -> FileResponse:
+    return _html_page("ohlc_spread_olymp.html")
+
+
 @app.get("/ohlc-1m")
 def ohlc_1m_redirect() -> RedirectResponse:
     """Ferramenta 1m substituida pelo coletor diario."""
@@ -149,6 +158,7 @@ def health() -> dict:
         "ohlc_running": collector.is_running(),
         "ohlc_1d_running": collector_1d.is_running(),
         "ohlc_eurusd_running": collector_eurusd.is_running(),
+        "ohlc_olymp_running": collector_olymp.is_running(),
         "supabase_ok": bool(st.get("supabase_ok")),
         "token_configured": bool(_control_token()),
         "duration_seconds": runner.get_duration_seconds(),
@@ -694,9 +704,12 @@ def _load_spread_bundle(
     otc_asset: str | None,
     eurusd_asset: str | None,
     limit: int,
+    *,
+    default_otc: str | None = None,
 ) -> dict:
     otc_a = normalize_asset(
         otc_asset
+        or default_otc
         or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
         or collector.status().get("asset")
         or "EURUSD_otc"
@@ -726,4 +739,299 @@ def _load_spread_bundle(
         "eurusd": eu_rows,
         "spread": spread,
         "eurusd_opens": opens,
+    }
+
+
+# --- Spread Olymp OTC vs EURUSD (1h) ---
+
+
+def _olymp_otc_asset(override: str | None = None) -> str:
+    return normalize_asset(
+        override
+        or os.environ.get("OHLC_OLYMP_OTC_ASSET", "").strip()
+        or collector_olymp.status().get("asset")
+        or olymp_default_otc_asset()
+    )
+
+
+@app.get("/api/ohlc-spread-olymp/status")
+def ohlc_spread_olymp_status(_: None = Depends(require_token)) -> dict:
+    otc_asset = _olymp_otc_asset()
+    try:
+        eu_st = collector_eurusd.status()
+    except Exception as exc:  # noqa: BLE001
+        eu_st = {
+            "running": collector_eurusd.is_running(),
+            "asset": "EURUSD",
+            "phase": "error",
+            "message": str(exc)[:200],
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+            "supabase_ok": False,
+        }
+    try:
+        olymp_st = collector_olymp.status()
+    except Exception as exc:  # noqa: BLE001
+        olymp_st = {
+            "running": False,
+            "asset": otc_asset,
+            "phase": "error",
+            "message": str(exc)[:200],
+        }
+    try:
+        otc_sum = stored_summary(otc_asset, "1h")
+    except Exception as exc:  # noqa: BLE001
+        otc_sum = {
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+        }
+    o_ok, o_msg = olymptrade_available()
+    return {
+        "otc": {
+            "asset": otc_asset,
+            "pair": olymp_st.get("pair"),
+            "collector_running": collector_olymp.is_running(),
+            "table": "ohlc_candles",
+            "source": "olymptrade",
+            **otc_sum,
+        },
+        "olymp": olymp_st,
+        "olymp_available": o_ok,
+        "olymp_msg": o_msg,
+        "eurusd": eu_st,
+        "timeframe": "1h",
+        "supabase_ok": eu_st.get("supabase_ok"),
+        "supabase_msg": eu_st.get("supabase_msg"),
+    }
+
+
+@app.post("/api/ohlc-spread-olymp/start")
+def ohlc_spread_olymp_start(
+    body: OhlcStartBody = OhlcStartBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Inicia coletor Olymp OTC + Dukascopy EURUSD."""
+    try:
+        collector_olymp.start(body.asset or _olymp_otc_asset())
+        collector_eurusd.start(
+            os.environ.get("OHLC_EURUSD_ASSET", "").strip() or "EURUSD"
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ohlc_spread_olymp_status(_)
+
+
+@app.post("/api/ohlc-spread-olymp/stop")
+def ohlc_spread_olymp_stop(_: None = Depends(require_token)) -> dict:
+    collector_olymp.stop()
+    collector_eurusd.stop()
+    return ohlc_spread_olymp_status(_)
+
+
+@app.post("/api/ohlc-spread-olymp/pull-now")
+def ohlc_spread_olymp_pull_now(
+    body: OhlcSpreadSyncBody = OhlcSpreadSyncBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa EURUSD_otc_olymp (Olymp) + EURUSD (Dukascopy)."""
+    try:
+        sync = sync_spread_olymp_sources(days=body.days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_olymp_status(_)
+    st["sync"] = sync
+    st["pull"] = {
+        "otc_upserted": (sync.get("otc") or {}).get("upserted"),
+        "eurusd_upserted": (sync.get("eurusd") or {}).get("upserted"),
+        "source_otc": "olymptrade",
+        "source_eurusd": "dukascopy",
+    }
+    eu = sync.get("eurusd") or {}
+    otc = sync.get("otc") or {}
+    if not eu.get("ok") and not otc.get("ok"):
+        detail = "; ".join(
+            x for x in (otc.get("error"), eu.get("error")) if x
+        ) or "Falha ao sincronizar Olymp + Dukascopy"
+        raise HTTPException(status_code=502, detail=detail)
+    return st
+
+
+@app.post("/api/ohlc-spread-olymp/backfill-otc")
+def ohlc_spread_olymp_backfill_otc(
+    body: OhlcSpreadOtcHistoryBody = OhlcSpreadOtcHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Puxa historico profundo OTC Olymptrade."""
+    otc_a = _olymp_otc_asset(body.asset)
+    try:
+        pull = collector_olymp.pull_history(otc_a, days=body.days)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_olymp_status(_)
+    st["backfill_otc"] = pull.get("pull")
+    return st
+
+
+@app.post("/api/ohlc-spread-olymp/backfill-dukascopy")
+def ohlc_spread_olymp_backfill_dukascopy(
+    body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        pull = collector_eurusd.pull_history(
+            days=body.days,
+            match_otc=body.match_otc,
+            otc_asset=body.otc_asset or _olymp_otc_asset(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_olymp_status(_)
+    st["backfill_dukascopy"] = pull.get("pull")
+    return st
+
+
+@app.get("/api/ohlc-spread-olymp/export")
+def ohlc_spread_olymp_export(
+    days: int = 14,
+    sync: int = 1,
+    _: None = Depends(require_token),
+) -> Response:
+    lookback = max(1, min(int(days), 90))
+    sync_info: dict | None = None
+    if sync:
+        try:
+            sync_info = sync_spread_olymp_sources(days=lookback)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not sync_info.get("ok"):
+            otc_err = (sync_info.get("otc") or {}).get("error")
+            eu_err = (sync_info.get("eurusd") or {}).get("error")
+            detail = "; ".join(x for x in (otc_err, eu_err) if x) or "Sync falhou"
+            raise HTTPException(status_code=502, detail=detail)
+
+    otc_a = _olymp_otc_asset()
+    eu_a = normalize_asset(
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip()
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
+    )
+    try:
+        otc_rows = fetch_candles(otc_a, timeframe="1h", limit=0)
+        eu_rows = fetch_candles(
+            eu_a, timeframe="1h", limit=0, table=TABLE_EURUSD
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"ohlc_1h_{otc_a}.csv", candles_to_csv(otc_rows))
+        zf.writestr(f"ohlc_1h_{eu_a}_dukascopy.csv", candles_to_csv(eu_rows))
+        if sync_info is not None:
+            import json
+
+            zf.writestr(
+                "sync_meta.json",
+                json.dumps(sync_info, ensure_ascii=False, indent=2),
+            )
+    data = buf.getvalue()
+    fname = f"ohlc_spread_olymp_{otc_a}_{eu_a}.zip"
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/ohlc-spread-olymp/series")
+def ohlc_spread_olymp_series(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    limit: int = 0,
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        payload = _load_spread_bundle(
+            otc_asset,
+            eurusd_asset,
+            limit,
+            default_otc=_olymp_otc_asset(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    weekend_n = sum(1 for p in payload["spread"] if p.get("weekend"))
+    after_hours_n = sum(1 for p in payload["spread"] if p.get("after_hours"))
+    return {
+        "timeframe": "1h",
+        "otc_source": "olymptrade",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "otc_count": len(payload["otc"]),
+        "eurusd_count": len(payload["eurusd"]),
+        "spread_count": len(payload["spread"]),
+        "weekend_points": weekend_n,
+        "after_hours_points": after_hours_n,
+        "eurusd_opens": payload["eurusd_opens"],
+        "otc": payload["otc"],
+        "eurusd": payload["eurusd"],
+        "spread": payload["spread"],
+    }
+
+
+@app.get("/api/ohlc-spread-olymp/ou")
+def ohlc_spread_olymp_ou(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    paired_only: bool = True,
+    min_n: int = 48,
+    limit: int = 0,
+    payout: float = 0.92,
+    z_min: float = 1.5,
+    edge_margin: float = 0.03,
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        payload = _load_spread_bundle(
+            otc_asset,
+            eurusd_asset,
+            limit,
+            default_otc=_olymp_otc_asset(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    analysis = analyze_spread_ou(
+        payload["spread"],
+        paired_only=paired_only,
+        min_n=max(20, min(min_n, 5000)),
+    )
+    signal = evaluate_paper_signal(
+        analysis,
+        payout=payout,
+        z_min=z_min,
+        edge_margin=edge_margin,
+    )
+    return {
+        "timeframe": "1h",
+        "otc_source": "olymptrade",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "spread_count": len(payload["spread"]),
+        "ou": analysis,
+        "signal": signal,
     }
