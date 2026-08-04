@@ -330,7 +330,9 @@ class OlympTradeClient:
         """
         Sends the required subscription, ping, and account info requests after connecting.
         This mimics the browser's startup sequence.
+        Candles do NOT require account_id — failures here are non-fatal.
         """
+        import os
         logger.info("Sending initial subscription, ping, and account info requests...")
         # 1. Send e:98 subscriptions (mimic browser)
         startup_subscriptions = [
@@ -346,34 +348,62 @@ class OlympTradeClient:
             [126],
         ]
         for sub in startup_subscriptions:
-            await self.send_request(98, sub, requires_response=False)
-        # 2. Send initial pings (e:90) - not strictly required, but mimics browser
-        import uuid
-        for _ in range(2):
-            await self.send_request(90, {}, requires_response=True)  # uuid auto-generated
-        # 3. Request account info (demo and real)
-        self.account_id = self.account_id or None
-        self.account_group = self.account_group or None
-        for group in ["demo", "real"]:
             try:
-                resp = await self.send_request(1068, [{"group": group}], requires_response=True)
+                await self.send_request(98, sub, requires_response=False)
+            except Exception as e:
+                logger.warning(f"Startup subscribe failed: {e}")
+        # 2. Ping without blocking long
+        try:
+            await self.send_request(90, {}, requires_response=False)
+        except Exception as e:
+            logger.warning(f"Startup ping failed: {e}")
+        # 3. Prefer real (contas reais sao o caso comum); demo depois
+        preferred = (
+            os.environ.get("OLYMPTRADE_ACCOUNT_GROUP", "real").strip().lower()
+            or "real"
+        )
+        groups = [preferred] + [g for g in ("real", "demo") if g != preferred]
+        if self.account_id:
+            logger.info(
+                f"Using pre-set account_id={self.account_id} group={self.account_group}"
+            )
+            return
+        for group in groups:
+            try:
+                resp = await self.send_request(
+                    1068,
+                    [{"group": group}],
+                    requires_response=True,
+                    timeout=5,
+                )
                 logger.info(f"Account info response for group {group}: {resp}")
-                if resp and 'd' in resp and isinstance(resp['d'], list) and resp['d']:
-                    self.account_id = resp['d'][0].get('account_id')
+                if resp and "d" in resp and isinstance(resp["d"], list) and resp["d"]:
+                    self.account_id = resp["d"][0].get("account_id")
                     self.account_group = group
-                    logger.info(f"Set account_id to {self.account_id} (group: {group})")
+                    logger.info(
+                        f"Set account_id to {self.account_id} (group: {group})"
+                    )
                     break
             except Exception as e:
                 logger.warning(f"Failed to get account_id for group {group}: {e}")
         if not self.account_id:
-            logger.error("Could not determine account_id from account info requests.")
-        # 4. Request balance for the found account_id
+            logger.warning(
+                "Could not determine account_id (ok para candles; trading precisa)."
+            )
+        # 4. Balance opcional
         if self.account_id:
             try:
-                resp = await self.send_request(1043, [{"account_id": self.account_id, "group": self.account_group}], requires_response=True)
+                resp = await self.send_request(
+                    1043,
+                    [{"account_id": self.account_id, "group": self.account_group}],
+                    requires_response=True,
+                    timeout=5,
+                )
                 logger.info(f"Balance info response: {resp}")
             except Exception as e:
-                logger.warning(f"Failed to get balance for account_id {self.account_id}: {e}")
+                logger.warning(
+                    f"Failed to get balance for account_id {self.account_id}: {e}"
+                )
 
     async def wait_for_balance(self, timeout: float = 10.0, poll_interval: float = 0.5):
         """
