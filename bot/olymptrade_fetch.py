@@ -155,9 +155,20 @@ def rows_for_store(
     pair: str | None = None,
 ) -> list[dict[str, Any]]:
     store_asset = asset or default_store_asset()
+    expect_tf = 3600 if timeframe == "1h" else (60 if timeframe == "1m" else None)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in raw_candles:
+        if not isinstance(raw, dict):
+            continue
+        # Descarta velas de outro timeframe (ex.: M1 rotuladas como 1h).
+        raw_tf = raw.get("tf")
+        if expect_tf is not None and raw_tf is not None:
+            try:
+                if int(raw_tf) != int(expect_tf):
+                    continue
+            except (TypeError, ValueError):
+                continue
         row = normalize_olymp_candle(
             raw, asset=store_asset, timeframe=timeframe, pair=pair
         )
