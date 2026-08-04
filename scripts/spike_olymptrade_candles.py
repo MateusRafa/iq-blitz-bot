@@ -5,7 +5,7 @@ Uso:
   python scripts/spike_olymptrade_candles.py
 
 Opcional:
-  set OLYMPTRADE_PAIR=EURUSD
+  set OLYMPTRADE_PAIR=EURUSD_otc
 """
 
 from __future__ import annotations
