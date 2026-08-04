@@ -84,34 +84,55 @@ class MarketAPI:
         # multiple requests or a different parameter to get exactly 'count'.
         # For now, we request data ending at 'to_ts'.
         
-        data = [{"pair": pair, "size": size, "to": to_ts, "solid": True}] # 'solid' is a guess
-        
-        # Also saw event 282 sent along with 10 in logs, purpose unclear. Send it too?
-        event_code_req_alt = 282
-        data_alt = [{"pair": pair, "size": size, "to": to_ts, "solid": True}]
+        data = [{"pair": pair, "size": size, "to": to_ts, "solid": True}]
 
         try:
-            # Send the primary request (e:10) and expect a response (e:1003)
-            # NOTE: The log for e:1003 doesn't show a UUID matching the e:10 request.
-            # This suggests e:1003 might be an unsolicited push triggered by e:10,
-            # or the UUID matching was missed in logging. Assuming direct response for now.
-            response = await self._client.send_request(event_code_req, data, requires_response=True)
-            
-            # Optionally send the secondary request (e:282) if needed - requires_response=False?
-            # await self._client.send_request(event_code_req_alt, data_alt, requires_response=False) 
+            import asyncio
 
-            if response and response.get("e") == event_code_resp:
-                 candles_data = response.get("d")
-                 if isinstance(candles_data, list):
-                     logger.info(f"Received {len(candles_data)} candles for {pair}.")
-                     # TODO: Validate candle format [{p, t, open, low, high, close}, ...]
-                     return candles_data
-                 else:
-                     logger.error(f"Unexpected data format in candle response: {candles_data}")
-                     return None
-            else:
-                 logger.error(f"Did not receive expected candle response (e:{event_code_resp}). Got: {response}")
-                 return None
+            # e:1003 costuma chegar como push (sem uuid casado com e:10).
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+
+            async def _on_candles(message: Dict[str, Any]):
+                if future.done():
+                    return
+                payload = message.get("d")
+                # Formato A: lista de candles
+                if isinstance(payload, list) and payload:
+                    first = payload[0] if isinstance(payload[0], dict) else {}
+                    # Se o lote traz o par, filtra; senao aceita
+                    pval = first.get("p") or first.get("pair")
+                    if pval and str(pval) != str(pair):
+                        return
+                    future.set_result(payload)
+                    return
+                # Formato B: {"candles":[...]} / [{"candles":[...]}]
+                if isinstance(payload, dict):
+                    candles = payload.get("candles") or payload.get("d")
+                    if isinstance(candles, list):
+                        future.set_result(candles)
+
+            self._client.register_callback(event_code_resp, _on_candles)
+            try:
+                await self._client.send_request(
+                    event_code_req, data, requires_response=False
+                )
+                # Alguns builds tambem disparam via e:282
+                try:
+                    await self._client.send_request(
+                        282, data, requires_response=False
+                    )
+                except Exception:
+                    pass
+                candles_data = await asyncio.wait_for(future, timeout=20.0)
+            finally:
+                self._client.unregister_callback(event_code_resp, _on_candles)
+
+            if isinstance(candles_data, list):
+                logger.info(f"Received {len(candles_data)} candles for {pair}.")
+                return candles_data
+            logger.error(f"Unexpected candle payload: {candles_data}")
+            return None
 
         except Exception as e:
             logger.error(f"Failed to get candles for {pair}: {e}")
