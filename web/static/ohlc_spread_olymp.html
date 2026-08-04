@@ -1431,7 +1431,7 @@
             (data.eurusd_asset || "EURUSD") +
             " [" +
             (data.eurusd_source || "?") +
-            "] · " +
+            " UTC] · " +
             eu.length +
             " velas · spread " +
             allSpread.length +
@@ -2225,7 +2225,7 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Puxando Dukascopy recente (incremental desde o último salvo)…";
+            "Regravando Dukascopy (últimos 14 dias UTC, cura buracos)…";
           const st = await api("/api/ohlc-spread-olymp/backfill-dukascopy", "POST", {
             days: 14,
             match_otc: false,
@@ -2234,7 +2234,7 @@
           renderStatus(st);
           const bf = st.backfill_dukascopy || {};
           document.getElementById("s-msg").textContent =
-            `Dukascopy recente: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            `Dukascopy (UTC): ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
             (bf.mode ? ` · ${bf.mode}` : "") +
             (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
             (bf.from ? ` · ${bf.from} → ${bf.to || "?"}` : "") +
