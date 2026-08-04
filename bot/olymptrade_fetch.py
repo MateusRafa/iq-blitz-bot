@@ -3,7 +3,7 @@
 Pacote vendorizado em ./olymptrade_ws (precisa estar no deploy / PYTHONPATH=.).
 
 Auth: OLYMPTRADE_ACCESS_TOKEN (cookie access_token no browser).
-Par OTC tipico: OLYMPTRADE_PAIR=EURUSD_otc.
+Par OTC tipico: OLYMPTRADE_PAIR=EURUSD_OTC (nome no WS; DevTools).
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ def olymptrade_available() -> tuple[bool, str]:
 
 
 def default_pair() -> str:
-    return _env("OLYMPTRADE_PAIR", "EURUSD_otc") or "EURUSD_otc"
+    # Nome real no WS Olymp (DevTools): EURUSD_OTC
+    return _env("OLYMPTRADE_PAIR", "EURUSD_OTC") or "EURUSD_OTC"
 
 
 def default_store_asset() -> str:
@@ -212,7 +213,7 @@ async def fetch_candles_async(
     access_token: str | None = None,
 ) -> list[dict[str, Any]]:
     """Pede um lote de candles historicos (event 10 → 1003 na lib)."""
-    p = (pair or default_pair()).strip() or "EURUSD_otc"
+    p = (pair or default_pair()).strip() or "EURUSD_OTC"
 
     async def _run(client: Any) -> list[dict[str, Any]]:
         return await _get_candles_on_client(
@@ -279,7 +280,7 @@ async def fetch_candles_history_async(
     on_chunk: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Pagina para tras com end_time ate cobrir `hours` (1 sessao WS)."""
-    p = (pair or default_pair()).strip() or "EURUSD_otc"
+    p = (pair or default_pair()).strip() or "EURUSD_OTC"
     hours = max(1, int(hours))
     chunk = max(8, min(int(chunk), 500))
 
