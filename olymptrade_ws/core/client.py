@@ -112,20 +112,19 @@ class OlympTradeClient:
 
 
     def register_callback(self, event_code: int, callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]):
-        logger.info(f"Registering callback for event_code={event_code}, callback={callback}")
-        """Register a callback for a specific unsolicited event code (e.g., ticks, balance updates)."""
+        """Register a callback for a specific unsolicited event code."""
         self._event_callbacks[event_code].append(callback)
 
     def unregister_callback(self, event_code: int, callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]):
-        logger.info(f"Unregistering callback for event_code={event_code}, callback={callback}")
-        """Unregister a specific callback."""
-        if event_code in self._event_callbacks:
-            try:
-                self._event_callbacks[event_code].remove(callback)
-                if not self._event_callbacks[event_code]: # Remove key if list is empty
-                    del self._event_callbacks[event_code]
-            except ValueError:
-                logger.warning(f"Callback not found for event code {event_code}")
+        """Unregister a specific callback (silencioso se ja nao existir)."""
+        if event_code not in self._event_callbacks:
+            return
+        try:
+            self._event_callbacks[event_code].remove(callback)
+            if not self._event_callbacks[event_code]:
+                del self._event_callbacks[event_code]
+        except ValueError:
+            return
 
 
     async def send_request(self, event_code: int, data: Any, requires_response: bool = True, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
