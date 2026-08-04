@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import lzma
 import os
 import struct
@@ -11,6 +12,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DATAFEED = "https://datafeed.dukascopy.com/datafeed"
 # EURUSD: precos em bi5 = valor * 100000
@@ -68,13 +71,17 @@ def _download_bi5(
             # 403/429/5xx: tenta de novo
             if exc.code not in (403, 408, 425, 429, 500, 502, 503, 504):
                 raise last_err from exc
+            # 503: datafeed saturado — espera mais antes de retry.
+            if exc.code == 503:
+                time.sleep(1.2 * (attempt + 1))
+                continue
         except urllib.error.URLError as exc:
             last_err = RuntimeError(f"Dukascopy rede: {exc.reason}")
         except TimeoutError as exc:
             last_err = RuntimeError(f"Dukascopy timeout: {url}")
             last_err.__cause__ = exc
         if attempt + 1 < retries:
-            time.sleep(0.4 * (attempt + 1))
+            time.sleep(0.5 * (attempt + 1))
     if last_err is not None:
         raise last_err
     return None
@@ -178,9 +185,9 @@ def fetch_eurusd_1h(
         hours.append(cur)
         cur += timedelta(hours=1)
 
-    workers = max(1, min(max_workers or _env_int("DUKASCOPY_WORKERS", 6), 12))
+    workers = max(1, min(max_workers or _env_int("DUKASCOPY_WORKERS", 4), 8))
     to = float(timeout if timeout is not None else _env_int("DUKASCOPY_TIMEOUT", 25))
-    retries = max(1, _env_int("DUKASCOPY_RETRIES", 3))
+    retries = max(1, _env_int("DUKASCOPY_RETRIES", 5))
     offer = "bid" if side.lower() != "ask" else "ask"
 
     rows: list[dict[str, Any]] = []
@@ -212,22 +219,40 @@ def fetch_eurusd_1h(
 
     rows.sort(key=lambda r: r["opened_at"])
 
-    # Se quase tudo falhou (nao e so fds sem arquivo), propaga erro claro.
+    def _is_fx_closed(h: datetime) -> bool:
+        # Sabado inteiro + domingo antes ~21:00 UTC: sem bi5 tipico.
+        if h.weekday() == 5:
+            return True
+        if h.weekday() == 6 and h.hour < 21:
+            return True
+        return False
+
+    session_hours = [h for h in hours if not _is_fx_closed(h)]
+    # Fds / mercado fechado: vazio e ok.
+    if hours and not rows and empty == len(hours):
+        return []
+    if hours and not rows and not session_hours:
+        return []
+    # Chunk so de fds com 503: nao derruba o pull inteiro.
+    if hours and not rows and errors and not session_hours:
+        return []
     if hours and not rows and errors:
+        # Se a maioria das horas de sessao veio vazia (404) e poucos 503,
+        # trata como mercado fechado / buraco — nao aborta.
+        if len(errors) <= max(3, len(hours) // 10):
+            return []
         sample = "; ".join(errors[:3])
         raise RuntimeError(
             f"Dukascopy sem velas ({len(errors)} erros / {len(hours)} horas). "
             f"Ex.: {sample}"
         )
-    if hours and not rows and empty == len(hours):
-        # Mercado fechado o intervalo inteiro (ex.: so sabado) — ok vazio.
-        return []
-    fail_ratio = len(errors) / max(len(hours), 1)
-    if rows and fail_ratio > 0.5 and len(errors) >= 8:
-        sample = "; ".join(errors[:2])
-        raise RuntimeError(
-            f"Dukascopy instavel: {len(errors)}/{len(hours)} horas falharam. "
-            f"Ex.: {sample}"
+    # Com algumas velas + 503: devolve o que veio (cura parcial).
+    if rows and errors:
+        logger.warning(
+            "Dukascopy parcial: %s/%s horas com erro; gravando %s velas.",
+            len(errors),
+            len(hours),
+            len(rows),
         )
     return rows
 
