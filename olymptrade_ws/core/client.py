@@ -7,7 +7,7 @@ from collections import defaultdict
 from olymptrade_ws.olympconfig import parameters
 from .connection import Connection
 from .protocol import format_message, parse_message, generate_uuid
-from olymptrade_ws.api import balance, market, trade # Import API modules
+from ..api import balance, market, trade
 import olymptrade_ws.olympconfig.parameters as settings
 
 logger = logging.getLogger(__name__)
