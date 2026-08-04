@@ -44,99 +44,148 @@ class MarketAPI:
             raise
             
     async def get_candles(self, pair: str, size: int, count: int, end_time: Optional[Union[datetime, int]] = None) -> Optional[List[Dict[str, Any]]]:
-        """
-        Requests historical candle data.
+        """Pede historico OHLC.
 
-        Args:
-            pair: Asset pair (e.g., "EURUSD", "ASIA_X").
-            size: Candle size in seconds (e.g., 5, 60, 300).
-            count: Number of candles to retrieve before end_time.
-            end_time: Timestamp (int seconds or datetime object) for the *end* of the period.
-                      Defaults to the current time.
-
-        Returns:
-            A list of candle dictionaries (format needs verification from e:1003 response) or None on error.
-            
-        NOTE: The exact mapping of 'count' to the API request ('solid'?) needs confirmation.
-              The response format (event 1003) structure needs verification.
+        Protocolo Olymp e pouco documentado: tenta e:10 e escuta e:1003 / e:11 /
+        qualquer push com campos OHLC. Se nada vier, retorna None (timeout).
         """
+        import asyncio
+        import os
+
         if end_time is None:
             to_ts = int(time.time())
         elif isinstance(end_time, datetime):
-            # Ensure datetime is timezone-aware (assume UTC if naive)
             if end_time.tzinfo is None:
-                 end_time = end_time.replace(tzinfo=timezone.utc)
+                end_time = end_time.replace(tzinfo=timezone.utc)
             to_ts = int(end_time.timestamp())
         else:
             to_ts = int(end_time)
 
-        logger.info(f"Requesting {count} candles for {pair} (size: {size}s) ending around {datetime.fromtimestamp(to_ts, tz=timezone.utc)}")
-        
-        # Event 10 seems to request candles, Event 1003 is the response in logs
-        event_code_req = 10
-        event_code_resp = 1003 # Expected response event code
-        
-        # The log shows 'solid: true'. This *might* relate to fetching historical batch?
-        # The 'count' parameter isn't directly visible in the logged request payload.
-        # The API might implicitly return a certain number based on 'to' and 'size',
-        # or 'count' needs to be mapped differently (e.g., calculate 'from' timestamp).
-        # Let's assume for now the API returns a batch ending at 'to'. We might need
-        # multiple requests or a different parameter to get exactly 'count'.
-        # For now, we request data ending at 'to_ts'.
-        
-        data = [{"pair": pair, "size": size, "to": to_ts, "solid": True}]
+        logger.info(
+            f"Requesting candles pair={pair} size={size}s count={count} to={to_ts}"
+        )
+
+        # Variantes de payload vistas em clients nao oficiais
+        payloads = [
+            [{"pair": pair, "size": size, "to": to_ts, "solid": True}],
+            [{"pair": pair, "size": size, "to": to_ts}],
+            [{"pair": pair, "size": size, "to": to_ts, "count": count}],
+            [
+                {
+                    "pair": pair,
+                    "size": size,
+                    "from": to_ts - max(size, 1) * max(count, 1),
+                    "to": to_ts,
+                }
+            ],
+        ]
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        candle_events = (1003, 11, 283)
+
+        def _extract(payload: Any) -> Optional[List[Dict[str, Any]]]:
+            if isinstance(payload, list) and payload:
+                if all(isinstance(x, dict) for x in payload):
+                    # lista de candles OU lista com wrapper
+                    if any(
+                        ("open" in x or "o" in x or "close" in x or "c" in x)
+                        for x in payload
+                    ):
+                        return payload  # type: ignore[return-value]
+                    for x in payload:
+                        nested = x.get("candles") if isinstance(x, dict) else None
+                        if isinstance(nested, list) and nested:
+                            return nested
+            if isinstance(payload, dict):
+                for key in ("candles", "d", "data", "history"):
+                    nested = payload.get(key)
+                    if isinstance(nested, list) and nested:
+                        return nested
+            return None
+
+        async def _on_msg(message: Dict[str, Any]):
+            if future.done():
+                return
+            extracted = _extract(message.get("d"))
+            if extracted:
+                # filtra por par se o campo existir
+                filtered = []
+                for c in extracted:
+                    if not isinstance(c, dict):
+                        continue
+                    pval = c.get("p") or c.get("pair")
+                    if pval and str(pval) != str(pair):
+                        continue
+                    filtered.append(c)
+                future.set_result(filtered or extracted)
+
+        for ev in candle_events:
+            self._client.register_callback(ev, _on_msg)
+        # Catch-all: qualquer evento com OHLC (descoberta)
+        async def _on_any(message: Dict[str, Any]):
+            if future.done():
+                return
+            extracted = _extract(message.get("d"))
+            if extracted:
+                logger.info(
+                    f"Candles via e:{message.get('e')} n={len(extracted)}"
+                )
+                await _on_msg(message)
+
+        # Registra em eventos comuns de chart se conhecidos; tambem 1 (ticks) nao
+        for ev in (1003, 11, 283, 10):
+            self._client.register_callback(ev, _on_any)
 
         try:
-            import asyncio
-
-            # e:1003 costuma chegar como push (sem uuid casado com e:10).
-            loop = asyncio.get_running_loop()
-            future = loop.create_future()
-
-            async def _on_candles(message: Dict[str, Any]):
-                if future.done():
-                    return
-                payload = message.get("d")
-                # Formato A: lista de candles
-                if isinstance(payload, list) and payload:
-                    first = payload[0] if isinstance(payload[0], dict) else {}
-                    # Se o lote traz o par, filtra; senao aceita
-                    pval = first.get("p") or first.get("pair")
-                    if pval and str(pval) != str(pair):
-                        return
-                    future.set_result(payload)
-                    return
-                # Formato B: {"candles":[...]} / [{"candles":[...]}]
-                if isinstance(payload, dict):
-                    candles = payload.get("candles") or payload.get("d")
-                    if isinstance(candles, list):
-                        future.set_result(candles)
-
-            self._client.register_callback(event_code_resp, _on_candles)
+            # Seleciona asset (alguns fluxos exigem)
             try:
                 await self._client.send_request(
-                    event_code_req, data, requires_response=False
+                    95,
+                    [{"cat": "digital", "pair": pair}],
+                    requires_response=False,
                 )
-                # Alguns builds tambem disparam via e:282
+            except Exception:
+                pass
+
+            for data in payloads:
+                if future.done():
+                    break
                 try:
-                    await self._client.send_request(
-                        282, data, requires_response=False
-                    )
-                except Exception:
-                    pass
-                candles_data = await asyncio.wait_for(future, timeout=20.0)
-            finally:
-                self._client.unregister_callback(event_code_resp, _on_candles)
+                    await self._client.send_request(10, data, requires_response=False)
+                    await self._client.send_request(282, data, requires_response=False)
+                except Exception as e:
+                    logger.warning(f"candle request send failed: {e}")
+                await asyncio.sleep(0.3)
+
+            timeout = float(os.environ.get("OLYMPTRADE_CANDLE_TIMEOUT", "25") or 25)
+            try:
+                candles_data = await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Timeout aguardando candles OHLC para {pair} "
+                    f"(e:10 enviado; sem e:1003/11). "
+                    f"Abra o grafico no browser e capture o evento no DevTools."
+                )
+                return None
 
             if isinstance(candles_data, list):
                 logger.info(f"Received {len(candles_data)} candles for {pair}.")
                 return candles_data
-            logger.error(f"Unexpected candle payload: {candles_data}")
             return None
-
         except Exception as e:
-            logger.error(f"Failed to get candles for {pair}: {e}")
+            logger.error(f"Failed to get candles for {pair}: {e!r}")
             return None
+        finally:
+            for ev in (1003, 11, 283, 10):
+                try:
+                    self._client.unregister_callback(ev, _on_msg)
+                except Exception:
+                    pass
+                try:
+                    self._client.unregister_callback(ev, _on_any)
+                except Exception:
+                    pass
 
     async def get_profitability(self, account_id: int) -> Optional[List[Dict[str, Any]]]:
         """Requests current profitability for assets (Event 182)."""
