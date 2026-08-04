@@ -211,9 +211,14 @@ class MarketAPI:
             logger.info(f"OHLC hit via e:{ev_i} ({len(result)} bars)")
             future.set_result(result)
 
-        self._client.register_global_callback(_on_any)
-        # Tambem callback dedicado e:18 (caso global falhe em algum path).
         self._client.register_callback(E_CANDLES, _on_any)
+        # Compat: client novo tem sniffer global; deploy antigo so tem register_callback.
+        _has_global = hasattr(self._client, "register_global_callback")
+        if _has_global:
+            self._client.register_global_callback(_on_any)
+        else:
+            for _ev in (10, 11, 1003, 282, 283):
+                self._client.register_callback(_ev, _on_any)
         try:
             # Inscreve push de candles (e:98).
             try:
@@ -298,8 +303,12 @@ class MarketAPI:
             logger.error(f"Failed to get candles for {pair}: {e!r}")
             return None
         finally:
-            self._client.unregister_global_callback(_on_any)
             self._client.unregister_callback(E_CANDLES, _on_any)
+            if _has_global and hasattr(self._client, "unregister_global_callback"):
+                self._client.unregister_global_callback(_on_any)
+            else:
+                for _ev in (10, 11, 1003, 282, 283):
+                    self._client.unregister_callback(_ev, _on_any)
 
     async def get_profitability(self, account_id: int) -> Optional[List[Dict[str, Any]]]:
         logger.info(f"Requesting asset profitability for account {account_id}...")
