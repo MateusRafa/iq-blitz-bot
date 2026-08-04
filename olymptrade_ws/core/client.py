@@ -24,6 +24,7 @@ class OlympTradeClient:
         
         self._response_futures: Dict[str, asyncio.Future] = {}
         self._event_callbacks: Dict[int, List[Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]]] = defaultdict(list)
+        self._global_callbacks: List[Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]] = []
         self._is_running = False
         self._processing_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
@@ -126,6 +127,20 @@ class OlympTradeClient:
         except ValueError:
             return
 
+    def register_global_callback(
+        self, callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Recebe TODAS as mensagens (apos parse), inclusive respostas com uuid."""
+        self._global_callbacks.append(callback)
+
+    def unregister_global_callback(
+        self, callback: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]
+    ) -> None:
+        try:
+            self._global_callbacks.remove(callback)
+        except ValueError:
+            return
+
 
     async def send_request(self, event_code: int, data: Any, requires_response: bool = True, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         #logger.info(f"send_request called with event_code={event_code}, data={data}, requires_response={requires_response}, timeout={timeout}")
@@ -219,11 +234,18 @@ class OlympTradeClient:
         logger.info("Message processing loop finished.")
 
     async def _dispatch_message(self, message: Dict[str, Any]):
-        logger.info(f"_dispatch_message called with message: {message}")
         """Handles a single parsed message dictionary."""
         request_uuid = message.get("uuid")
         event_code = message.get("e")
-        message_type = message.get("t") # 1: Server Push, 3: Response/Push?
+        message_type = message.get("t")  # noqa: F841
+
+        # Sniffer global (candles debug) — antes do early-return de uuid.
+        if self._global_callbacks:
+            for cb in list(self._global_callbacks):
+                try:
+                    await cb(message)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"global callback error: {exc}")
 
         if not event_code:
             logger.warning(f"Received message without event code: {message}")
@@ -237,32 +259,23 @@ class OlympTradeClient:
                 future.set_result(message)
             else:
                  logger.warning(f"Received response for already completed/cancelled uuid {request_uuid}")
-            # Even if it was a response, it might *also* be an event we have callbacks for
-            # Fall through to check callbacks unless we are sure responses are never also events.
-            # Based on logs (e.g., e:23 response AND e:22 push), it seems responses can be separate from pushes.
-            # Let's assume a message with a matched UUID is *only* a response for now.
-            return # Don't process as a general event if it was a direct response
+            return
 
         # --- Handle Internal State Updates ---
         if event_code == settings.E_BALANCE_UPDATE:
             logger.debug(f"Received balance update (e:{event_code}): {message.get('d')}")
-            # Store the latest balance data (assuming 'd' contains the relevant list/dict)
-            # The log shows 'd' is a list of account dicts. Find the relevant one if needed.
-            self._latest_balance = message # Store the whole message for now
+            self._latest_balance = message
         
         # --- Handle Registered Callbacks for Unsolicited Events ---
         if event_code in self._event_callbacks:
             logger.debug(f"Dispatching event {event_code} to {len(self._event_callbacks[event_code])} callbacks.")
-            # Create tasks for each callback to avoid blocking the dispatcher
             callback_tasks = [
                 asyncio.create_task(cb(message)) 
                 for cb in self._event_callbacks[event_code]
             ]
-            # Optionally gather results or just let them run
-            # asyncio.gather(*callback_tasks) # If you need to wait/handle errors
+            # fire-and-forget; tasks referenced to avoid GC warnings in some loops
+            _ = callback_tasks
         else:
-             # Log unhandled events if needed (can be noisy)
-             # logger.debug(f"Received unhandled event (e:{event_code}): {message}")
              pass
 
 
