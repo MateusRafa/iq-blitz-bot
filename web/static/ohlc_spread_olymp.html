@@ -2225,7 +2225,7 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Regravando Dukascopy (últimos 14 dias UTC, cura buracos)…";
+            "Puxando Dukascopy (incremental, overlap 48h)…";
           const st = await api("/api/ohlc-spread-olymp/backfill-dukascopy", "POST", {
             days: 14,
             match_otc: false,
@@ -2237,6 +2237,7 @@
             `Dukascopy (UTC): ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
             (bf.mode ? ` · ${bf.mode}` : "") +
             (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
+            (bf.skipped_chunks ? ` · ${bf.skipped_chunks} pulados` : "") +
             (bf.from ? ` · ${bf.from} → ${bf.to || "?"}` : "") +
             (bf.newest ? ` · até ${bf.newest}` : "");
           await loadCharts();
