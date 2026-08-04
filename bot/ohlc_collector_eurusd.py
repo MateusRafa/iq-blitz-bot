@@ -254,8 +254,8 @@ class OhlcCollectorEurusd:
     ) -> dict[str, Any]:
         """Puxa Dukascopy.
 
-        Padrao (match_otc=False): incremental a partir do ultimo candle
-        Dukascopy salvo (overlap 6h), limitado a `days` para tras.
+        Padrao (match_otc=False): rebaixa/regrava os ultimos `days`
+        (cura buracos e precos defasados).
         match_otc=True: backfill profundo desde o OTC mais antigo (raro).
         """
         ok, msg = supabase_ok()
@@ -292,9 +292,10 @@ class OhlcCollectorEurusd:
                     start = oldest_otc - timedelta(days=1)
                     matched_otc = True
             else:
-                # Incremental: so o que falta desde o ultimo Dukascopy.
+                # Botao "historico": regrava janela completa de `days`
+                # (cura buracos). Sync rotineiro continua incremental no pull_now.
                 start, end = self._resolve_window(
-                    asset, days=ndays, prefer_incremental=True
+                    asset, days=ndays, prefer_incremental=False
                 )
 
             span_days = max(1, int((end - start).total_seconds() // 86400) + 1)
@@ -305,7 +306,7 @@ class OhlcCollectorEurusd:
                     + (
                         f"(casando OTC {otc_a})"
                         if matched_otc
-                        else "(incremental / recentes)"
+                        else "(regrava janela completa)"
                     )
                     + "…"
                 ),
