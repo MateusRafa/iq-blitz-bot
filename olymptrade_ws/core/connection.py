@@ -41,17 +41,20 @@ class Connection:
                 logger.info("Already connected.")
                 return
 
-            headers = {
-                "Origin": parameters.DEFAULT_ORIGIN,
-                "User-Agent": parameters.DEFAULT_USER_AGENT,
+            origin = (
+                (parameters.DEFAULT_ORIGIN or "https://olymptrade.com").rstrip("/")
+            )
+            # Cookie sozinho nos headers; Origin/UA via kwargs nativos do websockets
+            # (evitar Origin duplicado → policy violation invalid_origin).
+            cookie_headers = {
                 "Cookie": f"access_token={self.access_token}",
             }
             try:
-                logger.info(f"Attempting to connect to {self.uri}...")
-                # websockets>=14 usa additional_headers; versoes antigas: extra_headers
+                logger.info(f"Attempting to connect to {self.uri} (origin={origin})...")
                 connect_kwargs = {
                     "ping_interval": None,
                     "open_timeout": parameters.DEFAULT_CONNECT_TIMEOUT,
+                    "origin": origin,
                 }
                 try:
                     import inspect
@@ -60,11 +63,15 @@ class Connection:
                 except (TypeError, ValueError):
                     params = {}
                 if "additional_headers" in params:
-                    connect_kwargs["additional_headers"] = headers
-                else:
-                    connect_kwargs["extra_headers"] = headers
-                if "origin" in params:
-                    connect_kwargs["origin"] = parameters.DEFAULT_ORIGIN
+                    connect_kwargs["additional_headers"] = cookie_headers
+                elif "extra_headers" in params:
+                    connect_kwargs["extra_headers"] = {
+                        **cookie_headers,
+                        "Origin": origin,
+                        "User-Agent": parameters.DEFAULT_USER_AGENT,
+                    }
+                if "user_agent_header" in params:
+                    connect_kwargs["user_agent_header"] = parameters.DEFAULT_USER_AGENT
 
                 self.websocket = await websockets.connect(self.uri, **connect_kwargs)
                 self._is_connected = True
