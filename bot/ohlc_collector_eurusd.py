@@ -250,6 +250,7 @@ class OhlcCollectorEurusd:
         days: int | None = None,
         match_otc: bool = False,
         otc_asset: str | None = None,
+        otc_table: str | None = None,
     ) -> dict[str, Any]:
         """Puxa Dukascopy.
 
@@ -275,6 +276,7 @@ class OhlcCollectorEurusd:
             or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
             or "EURUSD_otc"
         )
+        otc_tbl = otc_table or TABLE
         ndays = max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
         matched_otc = False
         try:
@@ -283,7 +285,7 @@ class OhlcCollectorEurusd:
             if match_otc:
                 start = end - timedelta(days=ndays)
                 try:
-                    oldest_otc = oldest_opened_at(otc_a, "1h", table=TABLE)
+                    oldest_otc = oldest_opened_at(otc_a, "1h", table=otc_tbl)
                 except Exception:  # noqa: BLE001
                     oldest_otc = None
                 if oldest_otc is not None:
