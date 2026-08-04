@@ -327,23 +327,18 @@ class OlympTradeClient:
         return self._latest_balance
 
     async def initialize_session(self):
-        """
-        Sends the required subscription, ping, and account info requests after connecting.
-        This mimics the browser's startup sequence.
-        Candles do NOT require account_id — failures here are non-fatal.
-        """
+        """Bootstrap leve: subscriptions + account via e:55 (nao depende de e:1068)."""
         import os
-        logger.info("Sending initial subscription, ping, and account info requests...")
-        # 1. Send e:98 subscriptions (mimic browser)
+        logger.info("Sending initial subscriptions...")
         startup_subscriptions = [
             [220],
-            [110,700,112,140,1038,1037,1039,141,22,26,111],
-            [1054,1076,1301,1097],
-            [141,241],
-            [230,231],
+            [110, 700, 112, 140, 1038, 1037, 1039, 141, 22, 26, 111],
+            [1054, 1076, 1301, 1097],
+            [141, 241],
+            [230, 231],
             [75],
             [1055],
-            [2223,2301,55,150,152,151,126,602,601],
+            [2223, 2301, 55, 150, 152, 151, 126, 602, 601],
             [2076],
             [126],
         ]
@@ -352,58 +347,41 @@ class OlympTradeClient:
                 await self.send_request(98, sub, requires_response=False)
             except Exception as e:
                 logger.warning(f"Startup subscribe failed: {e}")
-        # 2. Ping without blocking long
         try:
             await self.send_request(90, {}, requires_response=False)
         except Exception as e:
             logger.warning(f"Startup ping failed: {e}")
-        # 3. Prefer real (contas reais sao o caso comum); demo depois
+
         preferred = (
             os.environ.get("OLYMPTRADE_ACCOUNT_GROUP", "real").strip().lower()
             or "real"
         )
-        groups = [preferred] + [g for g in ("real", "demo") if g != preferred]
-        if self.account_id:
-            logger.info(
-                f"Using pre-set account_id={self.account_id} group={self.account_group}"
-            )
-            return
-        for group in groups:
-            try:
-                resp = await self.send_request(
-                    1068,
-                    [{"group": group}],
-                    requires_response=True,
-                    timeout=5,
-                )
-                logger.info(f"Account info response for group {group}: {resp}")
-                if resp and "d" in resp and isinstance(resp["d"], list) and resp["d"]:
-                    self.account_id = resp["d"][0].get("account_id")
-                    self.account_group = group
+        # Espera push e:55 (balance) — nos logs reais o account_id vem dai.
+        if not self.account_id:
+            bal = await self.wait_for_balance(timeout=8.0, poll_interval=0.4)
+            if bal and isinstance(bal.get("d"), list):
+                chosen = None
+                for acc in bal["d"]:
+                    if not isinstance(acc, dict):
+                        continue
+                    if acc.get("group") == preferred:
+                        chosen = acc
+                        break
+                if chosen is None:
+                    for acc in bal["d"]:
+                        if isinstance(acc, dict) and acc.get("account_id"):
+                            chosen = acc
+                            break
+                if chosen:
+                    self.account_id = chosen.get("account_id")
+                    self.account_group = chosen.get("group")
                     logger.info(
-                        f"Set account_id to {self.account_id} (group: {group})"
+                        f"account_id={self.account_id} group={self.account_group} (via e:55)"
                     )
-                    break
-            except Exception as e:
-                logger.warning(f"Failed to get account_id for group {group}: {e}")
         if not self.account_id:
             logger.warning(
-                "Could not determine account_id (ok para candles; trading precisa)."
+                "account_id ausente apos e:55 (candles ainda podem funcionar)."
             )
-        # 4. Balance opcional
-        if self.account_id:
-            try:
-                resp = await self.send_request(
-                    1043,
-                    [{"account_id": self.account_id, "group": self.account_group}],
-                    requires_response=True,
-                    timeout=5,
-                )
-                logger.info(f"Balance info response: {resp}")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get balance for account_id {self.account_id}: {e}"
-                )
 
     async def wait_for_balance(self, timeout: float = 10.0, poll_interval: float = 0.5):
         """
