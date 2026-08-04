@@ -22,7 +22,18 @@ class Connection:
 
     @property
     def is_connected(self) -> bool:
-        return self._is_connected and self.websocket is not None and not self.websocket.closed
+        if not self._is_connected or self.websocket is None:
+            return False
+        # websockets v10+: .closed; v13+: state / protocol.closed
+        ws = self.websocket
+        closed = getattr(ws, "closed", None)
+        if closed is not None:
+            return not closed
+        state = getattr(ws, "state", None)
+        if state is not None:
+            name = getattr(state, "name", str(state))
+            return name in ("OPEN", "CONNECTED")
+        return True
 
     async def connect(self):
         async with self._connect_lock:
@@ -33,16 +44,29 @@ class Connection:
             headers = {
                 "Origin": parameters.DEFAULT_ORIGIN,
                 "User-Agent": parameters.DEFAULT_USER_AGENT,
-                "Cookie": f"access_token={self.access_token}"
+                "Cookie": f"access_token={self.access_token}",
             }
             try:
                 logger.info(f"Attempting to connect to {self.uri}...")
-                self.websocket = await websockets.connect(
-                    self.uri,
-                    extra_headers=headers,
-                    ping_interval=None, # Disable automatic pings if we handle manually
-                    open_timeout=parameters.DEFAULT_CONNECT_TIMEOUT
-                )
+                # websockets>=14 usa additional_headers; versoes antigas: extra_headers
+                connect_kwargs = {
+                    "ping_interval": None,
+                    "open_timeout": parameters.DEFAULT_CONNECT_TIMEOUT,
+                }
+                try:
+                    import inspect
+
+                    params = inspect.signature(websockets.connect).parameters
+                except (TypeError, ValueError):
+                    params = {}
+                if "additional_headers" in params:
+                    connect_kwargs["additional_headers"] = headers
+                else:
+                    connect_kwargs["extra_headers"] = headers
+                if "origin" in params:
+                    connect_kwargs["origin"] = parameters.DEFAULT_ORIGIN
+
+                self.websocket = await websockets.connect(self.uri, **connect_kwargs)
                 self._is_connected = True
                 logger.info("✅ WebSocket connection established.")
                 # Start the receiver loop
@@ -51,20 +75,17 @@ class Connection:
                 else:
                     logger.warning("Receive task already running.")
 
-            except websockets.exceptions.InvalidStatusCode as e:
-                logger.error(f"❌ Connection failed: Invalid status code {e.status_code}. Check access_token.")
-                self._is_connected = False
-                self.websocket = None
-                raise ConnectionError(f"Invalid status code {e.status_code}") from e
-            except (websockets.exceptions.WebSocketException, OSError, asyncio.TimeoutError) as e:
-                logger.error(f"❌ Connection failed: {e}")
-                self._is_connected = False
-                self.websocket = None
-                raise ConnectionError(f"Connection failed: {e}") from e
             except Exception as e:
-                logger.error(f"❌ Unexpected connection error: {e}")
                 self._is_connected = False
                 self.websocket = None
+                name = e.__class__.__name__
+                if name in ("InvalidStatusCode", "InvalidStatus"):
+                    code = getattr(e, "status_code", None) or getattr(e, "response", None)
+                    logger.error(
+                        f"❌ Connection failed: Invalid status {code}. Check access_token."
+                    )
+                    raise ConnectionError(f"Invalid status {code}") from e
+                logger.error(f"❌ Connection failed: {e}")
                 raise ConnectionError(f"Unexpected connection error: {e}") from e
 
 
@@ -81,12 +102,12 @@ class Connection:
                     logger.error(f"Error during receiver task cancellation: {e}")
                 self._receive_task = None
 
-            if self.websocket and not self.websocket.closed:
+            if self.websocket is not None:
                 try:
-                    await self.websocket.close()
+                    closed = getattr(self.websocket, "closed", False)
+                    if not closed:
+                        await self.websocket.close()
                     logger.info("🔌 WebSocket connection closed.")
-                except websockets.exceptions.ConnectionClosedOK:
-                     logger.info("🔌 WebSocket connection already closed gracefully.")
                 except Exception as e:
                     logger.error(f"Error closing WebSocket: {e}")
             self.websocket = None
