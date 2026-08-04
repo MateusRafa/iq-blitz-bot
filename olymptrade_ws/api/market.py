@@ -1,4 +1,16 @@
 # api/market.py
+"""Market API Olymptrade — candles via e:18 (confirmado no DevTools).
+
+Formato real (WS Messages):
+  {"e":18,"t":3,"d":[{"p":"EURUSD_OTC","tf":3600,"candles":[
+      {"t":...,"open":...,"high":...,"low":...,"close":...}, ...
+  ]}]}
+
+Pedido tipico (Chipa / browser): e:10 com pair/size/to ou p/tf/to.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -11,11 +23,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Resposta real de historico OHLC (DevTools 2026-08).
+E_CANDLES = 18
+# Pedidos / legado Chipa
+E_CANDLES_REQ = (10, 282, 18)
+
 _OHLC_KEYS = ("open", "high", "low", "close", "o", "h", "l", "c")
 
 
 def _pair_aliases(pair: str) -> List[str]:
-    """DevTools mostra EURUSD_OTC (OTC maiusculo). Aceita variantes do env."""
+    """DevTools: EURUSD_OTC (OTC maiusculo)."""
     p = (pair or "").strip()
     if not p:
         return ["EURUSD_OTC", "EURUSD_otc", "EURUSD"]
@@ -29,7 +46,7 @@ def _pair_aliases(pair: str) -> List[str]:
         p,
         f"{root}_OTC",
         f"{root}_otc",
-        root.upper() + "_OTC" if root else "",
+        (root.upper() + "_OTC") if root else "",
         root,
         "EURUSD_OTC",
         "EURUSD_otc",
@@ -45,28 +62,46 @@ def _looks_like_candle(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
     has_ohlc = sum(1 for k in _OHLC_KEYS if k in item) >= 2
-    has_time = any(k in item for k in ("t", "time", "timestamp", "from", "tf", "ts"))
-    return has_ohlc and (has_time or "p" in item or "pair" in item)
+    has_time = any(k in item for k in ("t", "time", "timestamp", "from", "ts"))
+    return bool(has_ohlc and has_time)
 
 
 def _extract_candles(payload: Any) -> Optional[List[Dict[str, Any]]]:
+    """Extrai lista OHLC do envelope Olymp: d[].candles[] ou lista direta."""
     if isinstance(payload, list) and payload:
-        if all(_looks_like_candle(x) for x in payload[: min(5, len(payload))]):
-            return [x for x in payload if isinstance(x, dict)]
-        if all(isinstance(x, dict) for x in payload):
-            if any(_looks_like_candle(x) for x in payload):
-                return [x for x in payload if _looks_like_candle(x)]
-            for x in payload:
-                nested = x.get("candles") if isinstance(x, dict) else None
-                if isinstance(nested, list) and nested:
-                    got = _extract_candles(nested)
-                    if got:
-                        return got
-    if isinstance(payload, dict):
-        for key in ("candles", "d", "data", "history", "bars", "ohlc"):
-            nested = payload.get(key)
+        # Envelope: [{"p":"...","tf":3600,"candles":[...]}]
+        bars: List[Dict[str, Any]] = []
+        for x in payload:
+            if not isinstance(x, dict):
+                continue
+            nested = x.get("candles")
             if isinstance(nested, list) and nested:
-                got = _extract_candles(nested)
+                for c in nested:
+                    if _looks_like_candle(c):
+                        # Propaga par/tf do envelope se a vela nao tiver.
+                        row = dict(c)
+                        if "p" not in row and x.get("p"):
+                            row["p"] = x.get("p")
+                        if "pair" not in row and x.get("pair"):
+                            row["pair"] = x.get("pair")
+                        if "tf" not in row and x.get("tf") is not None:
+                            row["tf"] = x.get("tf")
+                        bars.append(row)
+                continue
+            if _looks_like_candle(x):
+                bars.append(x)
+        if bars:
+            return bars
+    if isinstance(payload, dict):
+        nested = payload.get("candles")
+        if isinstance(nested, list) and nested:
+            return _extract_candles(
+                [{"p": payload.get("p"), "tf": payload.get("tf"), "candles": nested}]
+            )
+        for key in ("d", "data", "history", "bars", "ohlc"):
+            inner = payload.get(key)
+            if inner is not None:
+                got = _extract_candles(inner)
                 if got:
                     return got
         if _looks_like_candle(payload):
@@ -105,7 +140,7 @@ class MarketAPI:
         count: int,
         end_time: Optional[Union[datetime, int]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
-        """Pede historico OHLC. Sniffa TODOS os eventos (protocolo Chipa e:10→1003 e incerto)."""
+        """Pede historico OHLC; escuta e:18 (formato DevTools)."""
         if end_time is None:
             to_ts = int(time.time())
         elif isinstance(end_time, datetime):
@@ -116,21 +151,22 @@ class MarketAPI:
             to_ts = int(end_time)
 
         pairs = _pair_aliases(pair)
-        sizes = [size]
-        if size != 60:
-            sizes.append(60)
-        if size != 3600:
-            sizes.append(3600)
-
+        primary = pairs[0]
         logger.info(
-            f"Requesting candles pair={pair} aliases={pairs} size={size}s "
-            f"count={count} to={to_ts}"
+            f"Requesting candles pair={primary} aliases={pairs} "
+            f"tf={size}s count={count} to={to_ts}"
         )
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         seen_events: Dict[int, int] = {}
         sample_by_e: Dict[int, str] = {}
+
+        def _pair_ok(pval: Any) -> bool:
+            if pval is None:
+                return True
+            s = str(pval)
+            return s in pairs or s == str(pair) or s.upper() in {x.upper() for x in pairs}
 
         async def _on_any(message: Dict[str, Any]) -> None:
             if future.done():
@@ -143,42 +179,55 @@ class MarketAPI:
             if ev_i >= 0:
                 seen_events[ev_i] = seen_events.get(ev_i, 0) + 1
                 if ev_i not in sample_by_e:
-                    d = message.get("d")
-                    sample_by_e[ev_i] = repr(d)[:220]
+                    sample_by_e[ev_i] = repr(message.get("d"))[:240]
 
+            # Prioriza e:18; aceita outros se tiverem candles[].
             extracted = _extract_candles(message.get("d"))
             if not extracted:
                 extracted = _extract_candles(message)
             if not extracted:
                 return
+            if ev_i not in (E_CANDLES, 1003, 11, 283, 10, -1) and not any(
+                "open" in c or "close" in c for c in extracted[:3]
+            ):
+                return
 
-            filtered: List[Dict[str, Any]] = []
-            for c in extracted:
-                if not isinstance(c, dict):
-                    continue
-                pval = c.get("p") or c.get("pair")
-                if pval and str(pval) not in pairs and str(pval) != str(pair):
-                    # Aceita mesmo assim se so veio um lote (par pode ser id numerico).
-                    filtered.append(c)
-                    continue
-                filtered.append(c)
-            logger.info(
-                f"OHLC hit via e:{ev_i} ({len(filtered or extracted)} bars)"
-            )
-            future.set_result(filtered or extracted)
+            filtered = [
+                c
+                for c in extracted
+                if isinstance(c, dict) and _pair_ok(c.get("p") or c.get("pair"))
+            ]
+            # Se filtro zerou mas veio lote unico de outro formato, aceita.
+            result = filtered or extracted
+            # Preferir tf pedido quando presente
+            if size:
+                same_tf = [
+                    c
+                    for c in result
+                    if not c.get("tf") or int(c.get("tf") or 0) == int(size)
+                ]
+                if same_tf:
+                    result = same_tf
+            logger.info(f"OHLC hit via e:{ev_i} ({len(result)} bars)")
+            future.set_result(result)
 
         self._client.register_global_callback(_on_any)
+        # Tambem callback dedicado e:18 (caso global falhe em algum path).
+        self._client.register_callback(E_CANDLES, _on_any)
         try:
-            for p in pairs:
+            # Inscreve push de candles (e:98).
+            try:
+                await self._client.send_request(
+                    98, [E_CANDLES, 10, 11, 282, 283], requires_response=False
+                )
+            except Exception:
+                pass
+
+            for p in pairs[:3]:
                 try:
                     await self._client.send_request(
                         95,
                         [{"cat": "digital", "pair": p}],
-                        requires_response=False,
-                    )
-                    await self._client.send_request(
-                        95,
-                        [{"cat": "forex", "pair": p}],
                         requires_response=False,
                     )
                 except Exception:
@@ -193,41 +242,41 @@ class MarketAPI:
                 except Exception:
                     pass
 
-            for p in pairs:
+            # Pedidos: nomes pair/size (Chipa) e p/tf (igual ao response DevTools).
+            for p in pairs[:3]:
                 if future.done():
                     break
-                for sz in sizes:
+                from_ts = to_ts - max(size, 1) * max(count, 1)
+                payloads = [
+                    [{"pair": p, "size": size, "to": to_ts, "solid": True}],
+                    [{"p": p, "tf": size, "to": to_ts, "solid": True}],
+                    [{"pair": p, "size": size, "to": to_ts}],
+                    [{"p": p, "tf": size, "to": to_ts}],
+                    [{"pair": p, "size": size, "to": to_ts, "count": count}],
+                    [{"p": p, "tf": size, "from": from_ts, "to": to_ts}],
+                    [
+                        {
+                            "pair": p,
+                            "size": size,
+                            "from": from_ts,
+                            "to": to_ts,
+                            "solid": True,
+                        }
+                    ],
+                ]
+                for data in payloads:
                     if future.done():
                         break
-                    from_ts = to_ts - max(sz, 1) * max(count, 1)
-                    payloads = [
-                        [{"pair": p, "size": sz, "to": to_ts, "solid": True}],
-                        [{"pair": p, "size": sz, "to": to_ts}],
-                        [{"pair": p, "size": sz, "to": to_ts, "count": count}],
-                        [{"pair": p, "size": sz, "from": from_ts, "to": to_ts}],
-                        [
-                            {
-                                "pair": p,
-                                "size": sz,
-                                "from": from_ts,
-                                "to": to_ts,
-                                "solid": True,
-                            }
-                        ],
-                    ]
-                    for data in payloads:
-                        if future.done():
-                            break
-                        for ev in (10, 282, 11, 283, 1003):
-                            try:
-                                await self._client.send_request(
-                                    ev, data, requires_response=False
-                                )
-                            except Exception as e:
-                                logger.debug(f"candle send e:{ev} failed: {e}")
-                        await asyncio.sleep(0.15)
+                    for ev in E_CANDLES_REQ:
+                        try:
+                            await self._client.send_request(
+                                ev, data, requires_response=False
+                            )
+                        except Exception as e:
+                            logger.debug(f"candle send e:{ev} failed: {e}")
+                    await asyncio.sleep(0.12)
 
-            timeout = float(os.environ.get("OLYMPTRADE_CANDLE_TIMEOUT", "20") or 20)
+            timeout = float(os.environ.get("OLYMPTRADE_CANDLE_TIMEOUT", "25") or 25)
             try:
                 candles_data = await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
@@ -236,10 +285,8 @@ class MarketAPI:
                     f"e:{e}={sample_by_e.get(e, '')}" for e, _ in top[:5]
                 )
                 logger.error(
-                    f"Timeout candles {pair}: sem OHLC. Eventos vistos: {top}. "
-                    f"Amostras: {samples}. "
-                    "Defina OLYMPTRADE_PAIR=EURUSD_OTC e capture no DevTools "
-                    "o frame WS com open/high/low/close (campo e=)."
+                    f"Timeout candles {pair}: sem OHLC e:18. Eventos: {top}. "
+                    f"Amostras: {samples}"
                 )
                 return None
 
@@ -252,6 +299,7 @@ class MarketAPI:
             return None
         finally:
             self._client.unregister_global_callback(_on_any)
+            self._client.unregister_callback(E_CANDLES, _on_any)
 
     async def get_profitability(self, account_id: int) -> Optional[List[Dict[str, Any]]]:
         logger.info(f"Requesting asset profitability for account {account_id}...")
