@@ -1,6 +1,7 @@
 """Coletor OHLC Olymptrade OTC → Supabase (ferramenta /ohlc-spread-olymp).
 
-Ativo de store: EURUSD_otc_olymp (separado da Pocket).
+Tabela: ohlc_candles_olymp (separada da Pocket ohlc_candles).
+Ativo de store: EURUSD_otc_olymp.
 Fonte: olymptrade_ws (API nao oficial) via bot.olymptrade_fetch.
 """
 
@@ -14,6 +15,7 @@ from typing import Any
 
 from bot.ohlc_collector import seconds_until_next_hourly_fetch
 from bot.ohlc_store import (
+    TABLE_OLYMP,
     merge_ohlc_with_existing,
     stored_summary,
     supabase_ok,
@@ -27,7 +29,7 @@ from bot.olymptrade_fetch import (
 )
 from bot.runner import normalize_asset
 
-TABLE = "ohlc_candles"
+TABLE = TABLE_OLYMP
 SOURCE = "olymptrade"
 
 
@@ -42,7 +44,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 class OhlcCollectorOlymp:
-    """Thread: Olymp WS → candles 1h → upsert ohlc_candles."""
+    """Thread: Olymp WS → candles 1h → upsert ohlc_candles_olymp."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -55,6 +57,7 @@ class OhlcCollectorOlymp:
             "asset": self._asset,
             "pair": self._pair,
             "source": SOURCE,
+            "table": TABLE,
             "timeframes": ["1h"],
             "supabase_ok": False,
             "supabase_msg": "",
