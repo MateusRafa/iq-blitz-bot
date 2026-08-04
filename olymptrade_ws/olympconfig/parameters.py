@@ -1,11 +1,28 @@
 # config/settings.py
+import os
 
-# Default WebSocket URI (consider making this configurable)
-DEFAULT_WEBSOCKET_URI = "wss://ws.olymptrade.com/otp?cid_ver=1&cid_app=web%40OlympTrade%402025.2.26123%4026123&cid_device=%40%40desktop&cid_os=windows%4010"
+# Default WebSocket URI (override: OLYMPTRADE_WS_URI)
+DEFAULT_WEBSOCKET_URI = os.environ.get(
+    "OLYMPTRADE_WS_URI",
+    "wss://ws.olymptrade.com/otp?cid_ver=1"
+    "&cid_app=web%40OlympTrade%402025.3.26878%4026878"
+    "&cid_device=%40%40desktop"
+    "&cid_os=windows%4010",
+).replace("\n", "")
 
-# Default Headers
-DEFAULT_ORIGIN = "https://olymptrade.com"
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+# Default Headers (override: OLYMPTRADE_ORIGIN)
+DEFAULT_ORIGIN = (
+    os.environ.get("OLYMPTRADE_ORIGIN", "https://olymptrade.com").strip().rstrip("/")
+    or "https://olymptrade.com"
+)
+DEFAULT_USER_AGENT = os.environ.get(
+    "OLYMPTRADE_USER_AGENT",
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+)
 
 # Timeouts (in seconds)
 DEFAULT_CONNECT_TIMEOUT = 10
