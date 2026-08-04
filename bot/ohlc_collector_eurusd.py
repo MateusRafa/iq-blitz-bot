@@ -254,8 +254,8 @@ class OhlcCollectorEurusd:
     ) -> dict[str, Any]:
         """Puxa Dukascopy.
 
-        Padrao (match_otc=False): rebaixa/regrava os ultimos `days`
-        (cura buracos e precos defasados).
+        Padrao (match_otc=False): incremental desde o ultimo salvo
+        (overlap 48h para curar buracos recentes), limitado a `days`.
         match_otc=True: backfill profundo desde o OTC mais antigo (raro).
         """
         ok, msg = supabase_ok()
@@ -269,6 +269,7 @@ class OhlcCollectorEurusd:
         upserted = 0
         fetched = 0
         chunks = 0
+        skipped = 0
         start: datetime | None = None
         end: datetime | None = None
         otc_a = normalize_asset(
@@ -292,10 +293,9 @@ class OhlcCollectorEurusd:
                     start = oldest_otc - timedelta(days=1)
                     matched_otc = True
             else:
-                # Botao "historico": regrava janela completa de `days`
-                # (cura buracos). Sync rotineiro continua incremental no pull_now.
+                # Incremental + overlap generoso (cura buracos sem martelar 14d).
                 start, end = self._resolve_window(
-                    asset, days=ndays, prefer_incremental=False
+                    asset, days=ndays, prefer_incremental=True
                 )
 
             span_days = max(1, int((end - start).total_seconds() // 86400) + 1)
@@ -306,7 +306,7 @@ class OhlcCollectorEurusd:
                     + (
                         f"(casando OTC {otc_a})"
                         if matched_otc
-                        else "(regrava janela completa)"
+                        else "(incremental / recentes)"
                     )
                     + "…"
                 ),
@@ -315,11 +315,10 @@ class OhlcCollectorEurusd:
             )
 
             chunk_hours = max(
-                12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 72), 168)
+                12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 48), 72)
             )
-            # Janela curta: chunks menores = menos ConnectionTerminated.
             if not matched_otc and span_days <= 21:
-                chunk_hours = min(chunk_hours, 48)
+                chunk_hours = min(chunk_hours, 24)
 
             cursor = start
             by_t: dict[str, dict[str, Any]] = {}
@@ -332,9 +331,21 @@ class OhlcCollectorEurusd:
                         f"{cursor.date()} → {piece_end.date()}…"
                     )
                 )
-                part = fetch_eurusd_1h_rows_for_store(
-                    cursor, piece_end, asset=asset
-                )
+                try:
+                    part = fetch_eurusd_1h_rows_for_store(
+                        cursor, piece_end, asset=asset
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # 503 / fds: pula chunk e segue (nao zera o pull inteiro).
+                    skipped += 1
+                    self._set(
+                        message=(
+                            f"Chunk {chunks} pulado ({cursor.date()}): "
+                            f"{str(exc)[:160]}"
+                        )
+                    )
+                    part = []
+                    time.sleep(2.0)
                 for row in part:
                     by_t[str(row["opened_at"])] = row
                 if part:
@@ -352,26 +363,39 @@ class OhlcCollectorEurusd:
                     except Exception:  # noqa: BLE001
                         pass
                 cursor = piece_end
+                time.sleep(0.4)
 
             rows = sorted(by_t.values(), key=lambda r: str(r["opened_at"]))
             oldest = rows[0]["opened_at"] if rows else None
             newest = rows[-1]["opened_at"] if rows else None
-            if upserted <= 0 and end.weekday() < 5:
+            if upserted <= 0 and end.weekday() < 5 and skipped == chunks:
                 raise RuntimeError(
                     "Dukascopy historico retornou 0 velas. "
-                    "Datafeed indisponivel ou bloqueado."
+                    "Datafeed indisponivel ou bloqueado (HTTP 503). "
+                    "Aguarde 1–2 min e tente de novo."
                 )
-
-            was_running = self.is_running()
-            self._set(
-                phase="waiting" if was_running else "idle",
-                message=(
-                    f"Historico Dukascopy ok: {upserted}/{fetched} velas "
-                    f"em {chunks} chunks "
-                    f"({oldest or '?'} → {newest or '?'})"
-                ),
-                error=None,
-            )
+            if upserted <= 0 and end.weekday() < 5 and not rows:
+                # Pode ser so overlap ja gravado / fds no fim da janela.
+                self._set(
+                    phase="waiting" if self.is_running() else "idle",
+                    message=(
+                        "Dukascopy: nada novo nesta janela "
+                        f"(chunks={chunks}, skipped={skipped})"
+                    ),
+                    error=None,
+                )
+            else:
+                was_running = self.is_running()
+                self._set(
+                    phase="waiting" if was_running else "idle",
+                    message=(
+                        f"Historico Dukascopy ok: {upserted}/{fetched} velas "
+                        f"em {chunks} chunks"
+                        + (f" ({skipped} pulados)" if skipped else "")
+                        + f" ({oldest or '?'} → {newest or '?'})"
+                    ),
+                    error=None,
+                )
             with self._lock:
                 self._snap["last_upsert"] = upserted
                 self._snap["total_upserted"] = int(
@@ -397,6 +421,7 @@ class OhlcCollectorEurusd:
             "upserted": upserted,
             "fetched": fetched,
             "chunks": chunks,
+            "skipped_chunks": skipped,
             "asset": asset,
             "source": SOURCE,
             "match_otc": matched_otc,
@@ -441,8 +466,8 @@ class OhlcCollectorEurusd:
             last = None
         if last is None:
             return start, end
-        # Overlap 6h para regravar velas recentes/incompletas.
-        candidate = last - timedelta(hours=6)
+        # Overlap 48h para regravar velas recentes/incompletas e curar buracos.
+        candidate = last - timedelta(hours=48)
         # Nao encolher demais: se o gap for grande, respeita lookback days.
         if candidate > start:
             start = candidate
