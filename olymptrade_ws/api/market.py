@@ -151,7 +151,11 @@ class MarketAPI:
             to_ts = int(end_time)
 
         pairs = _pair_aliases(pair)
-        primary = pairs[0]
+        # Preferir *_OTC como primario (evitar EURUSD FX = 1.153).
+        primary = next(
+            (x for x in pairs if x.upper().endswith("_OTC")),
+            pairs[0],
+        )
         logger.info(
             f"Requesting candles pair={primary} aliases={pairs} "
             f"tf={size}s count={count} to={to_ts}"
@@ -164,9 +168,11 @@ class MarketAPI:
 
         def _pair_ok(pval: Any) -> bool:
             if pval is None:
-                return True
+                return False  # exige par no envelope (evita misturar EURUSD FX)
             s = str(pval)
-            return s in pairs or s == str(pair) or s.upper() in {x.upper() for x in pairs}
+            wanted = {x.upper() for x in pairs}
+            wanted.add(str(pair).upper())
+            return s.upper() in wanted
 
         async def _on_any(message: Dict[str, Any]) -> None:
             if future.done():
@@ -181,15 +187,14 @@ class MarketAPI:
                 if ev_i not in sample_by_e:
                     sample_by_e[ev_i] = repr(message.get("d"))[:240]
 
-            # Prioriza e:18; aceita outros se tiverem candles[].
+            # So aceita historico real e:18 (DevTools). Ignora pushes de outros eventos.
+            if ev_i != E_CANDLES:
+                return
+
             extracted = _extract_candles(message.get("d"))
             if not extracted:
                 extracted = _extract_candles(message)
             if not extracted:
-                return
-            if ev_i not in (E_CANDLES, 1003, 11, 283, 10, -1) and not any(
-                "open" in c or "close" in c for c in extracted[:3]
-            ):
                 return
 
             filtered = [
@@ -197,19 +202,35 @@ class MarketAPI:
                 for c in extracted
                 if isinstance(c, dict) and _pair_ok(c.get("p") or c.get("pair"))
             ]
-            # Se filtro zerou mas veio lote unico de outro formato, aceita.
-            result = filtered or extracted
-            # Preferir tf pedido quando presente
-            if size:
-                same_tf = [
-                    c
-                    for c in result
-                    if not c.get("tf") or int(c.get("tf") or 0) == int(size)
-                ]
-                if same_tf:
-                    result = same_tf
-            logger.info(f"OHLC hit via e:{ev_i} ({len(result)} bars)")
-            future.set_result(result)
+            if not filtered:
+                logger.debug(
+                    f"e:18 ignorado (par != {primary}): "
+                    f"{(extracted[0] or {}).get('p')}"
+                )
+                return
+
+            # Exige tf == size (3600=1h). Nao floorar M1/M5 como se fosse H1.
+            same_tf = [
+                c
+                for c in filtered
+                if c.get("tf") is None or int(c.get("tf") or 0) == int(size)
+            ]
+            if not same_tf:
+                tfs = sorted(
+                    {
+                        int(c.get("tf"))
+                        for c in filtered
+                        if c.get("tf") is not None
+                    }
+                )
+                logger.debug(f"e:18 ignorado (tf {tfs} != {size})")
+                return
+
+            logger.info(
+                f"OHLC hit via e:{ev_i} pair={primary} tf={size} "
+                f"({len(same_tf)} bars)"
+            )
+            future.set_result(same_tf)
 
         self._client.register_callback(E_CANDLES, _on_any)
         # Compat: client novo tem sniffer global; deploy antigo so tem register_callback.
@@ -228,7 +249,7 @@ class MarketAPI:
             except Exception:
                 pass
 
-            for p in pairs[:3]:
+            for p in (primary,):
                 try:
                     await self._client.send_request(
                         95,
@@ -247,39 +268,35 @@ class MarketAPI:
                 except Exception:
                     pass
 
-            # Pedidos: nomes pair/size (Chipa) e p/tf (igual ao response DevTools).
-            for p in pairs[:3]:
+            # Pedidos so no par primario (evita disparar e:18 de EURUSD FX).
+            from_ts = to_ts - max(size, 1) * max(count, 1)
+            p = primary
+            payloads = [
+                [{"p": p, "tf": size, "to": to_ts, "solid": True}],
+                [{"pair": p, "size": size, "to": to_ts, "solid": True}],
+                [{"p": p, "tf": size, "from": from_ts, "to": to_ts}],
+                [
+                    {
+                        "pair": p,
+                        "size": size,
+                        "from": from_ts,
+                        "to": to_ts,
+                        "solid": True,
+                    }
+                ],
+                [{"p": p, "tf": size, "to": to_ts}],
+            ]
+            for data in payloads:
                 if future.done():
                     break
-                from_ts = to_ts - max(size, 1) * max(count, 1)
-                payloads = [
-                    [{"pair": p, "size": size, "to": to_ts, "solid": True}],
-                    [{"p": p, "tf": size, "to": to_ts, "solid": True}],
-                    [{"pair": p, "size": size, "to": to_ts}],
-                    [{"p": p, "tf": size, "to": to_ts}],
-                    [{"pair": p, "size": size, "to": to_ts, "count": count}],
-                    [{"p": p, "tf": size, "from": from_ts, "to": to_ts}],
-                    [
-                        {
-                            "pair": p,
-                            "size": size,
-                            "from": from_ts,
-                            "to": to_ts,
-                            "solid": True,
-                        }
-                    ],
-                ]
-                for data in payloads:
-                    if future.done():
-                        break
-                    for ev in E_CANDLES_REQ:
-                        try:
-                            await self._client.send_request(
-                                ev, data, requires_response=False
-                            )
-                        except Exception as e:
-                            logger.debug(f"candle send e:{ev} failed: {e}")
-                    await asyncio.sleep(0.12)
+                for ev in E_CANDLES_REQ:
+                    try:
+                        await self._client.send_request(
+                            ev, data, requires_response=False
+                        )
+                    except Exception as e:
+                        logger.debug(f"candle send e:{ev} failed: {e}")
+                await asyncio.sleep(0.2)
 
             timeout = float(os.environ.get("OLYMPTRADE_CANDLE_TIMEOUT", "25") or 25)
             try:
