@@ -18,6 +18,7 @@ TABLE = "ohlc_candles"
 TABLE_1M = "ohlc_candles_1m"
 TABLE_1D = "ohlc_candles_1d"  # coletor diario (/ohlc-1d)
 TABLE_EURUSD = "ohlc_candles_eurusd"  # EURUSD mercado 1h (/ohlc-spread)
+TABLE_OLYMP = "ohlc_candles_olymp"  # OTC Olymptrade 1h (/ohlc-spread-olymp)
 UPSERT_CHUNK = 200
 FETCH_PAGE = 1000
 
