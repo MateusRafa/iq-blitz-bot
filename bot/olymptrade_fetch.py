@@ -103,7 +103,7 @@ def normalize_olymp_candle(
     timeframe: str = "1h",
     pair: str | None = None,
 ) -> dict[str, Any] | None:
-    """Normaliza candle Olymp → row ohlc_candles (source=olymptrade)."""
+    """Normaliza candle Olymp → row ohlc_candles_olymp (source=olymptrade)."""
     if not isinstance(raw, dict):
         return None
     # Respostas aninhadas: {"candle": {...}} / {"d": {...}}
@@ -354,7 +354,7 @@ def fetch_ohlc_1h_rows_for_store(
     asset: str | None = None,
     access_token: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Candles 1h normalizados prontos para upsert em ohlc_candles."""
+    """Candles 1h normalizados prontos para upsert em ohlc_candles_olymp."""
     raw = fetch_candles_history(
         pair,
         size=3600,
