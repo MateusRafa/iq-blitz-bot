@@ -22,12 +22,18 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-_IMPORT_ERR: str | None = None
 try:
-    from olymptrade_ws import OlympTradeClient  # type: ignore
+    from olymptrade_ws.core.client import OlympTradeClient  # type: ignore
 except ImportError as exc:  # pragma: no cover
-    OlympTradeClient = None  # type: ignore[misc, assignment]
-    _IMPORT_ERR = str(exc)
+    try:
+        from olymptrade_ws import OlympTradeClient  # type: ignore
+    except ImportError as exc2:  # pragma: no cover
+        OlympTradeClient = None  # type: ignore[misc, assignment]
+        _IMPORT_ERR = f"{exc}; {exc2}"
+    else:
+        _IMPORT_ERR = None
+else:
+    _IMPORT_ERR = None
 
 
 def _env(name: str, default: str = "") -> str:
