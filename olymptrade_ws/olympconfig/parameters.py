@@ -36,7 +36,8 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 # Event Codes (Inferred from logs - NEEDS VERIFICATION AND COMPLETION)
 # Naming convention: E_<Description>
 E_TICK_UPDATE = 1
-E_GET_CANDLES_RESPONSE = 1003
+# Historico OHLC: resposta real no browser e e:18 (nao 1003 da lib Chipa).
+E_GET_CANDLES_RESPONSE = 18
 E_GET_CANDLES_REQUEST = 10
 E_SUBSCRIBE_CANDLES = 282 # Associated with candles?
 E_UNSUBSCRIBE_CANDLES = 281 # Associated with candles?
