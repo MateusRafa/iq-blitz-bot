@@ -1,25 +1,33 @@
 """Cliente nao oficial Olymptrade (WS) → candles OHLC.
 
-Usa a lib ChipaDevTeam/OlympTradeAPI (`olymptrade_ws`) quando instalada:
-  pip install "git+https://github.com/ChipaDevTeam/OlympTradeAPI.git"
+Pacote vendorizado em ./olymptrade_ws (precisa estar no deploy / PYTHONPATH=.).
 
-Auth: OLYMPTRADE_ACCESS_TOKEN (JWT/bearer capturado no browser).
-Par OTC tipico: OLYMPTRADE_PAIR=EURUSD (ajustavel).
+Auth: OLYMPTRADE_ACCESS_TOKEN (cookie access_token no browser).
+Par OTC tipico: OLYMPTRADE_PAIR=EURUSD.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 SOURCE = "olymptrade"
 
+# Garante que o pacote vendorizado na raiz do repo seja importavel no Railway.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+_IMPORT_ERR: str | None = None
 try:
     from olymptrade_ws import OlympTradeClient  # type: ignore
-except ImportError:  # pragma: no cover
+except ImportError as exc:  # pragma: no cover
     OlympTradeClient = None  # type: ignore[misc, assignment]
+    _IMPORT_ERR = str(exc)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -28,10 +36,18 @@ def _env(name: str, default: str = "") -> str:
 
 def olymptrade_available() -> tuple[bool, str]:
     if OlympTradeClient is None:
+        detail = _IMPORT_ERR or "ImportError"
+        vendored = (_ROOT / "olymptrade_ws" / "__init__.py").is_file()
+        if not vendored:
+            return (
+                False,
+                'Pasta "olymptrade_ws/" ausente no deploy. '
+                "Faca push dessa pasta no GitHub e redeploy no Railway.",
+            )
         return (
             False,
-            'Pacote "olymptrade_ws" nao instalado. '
-            'pip install "git+https://github.com/ChipaDevTeam/OlympTradeAPI.git"',
+            f'Falha ao importar olymptrade_ws: {detail}. '
+            "Confira websockets/aiohttp no requirements.txt.",
         )
     if not _env("OLYMPTRADE_ACCESS_TOKEN"):
         return False, "Defina OLYMPTRADE_ACCESS_TOKEN no ambiente."
@@ -165,19 +181,15 @@ async def _with_client(
     client = OlympTradeClient(access_token=token)
     await client.start()
     try:
-        # Algumas builds exigem initialize_session / balance para liberar market.
+        # Bootstrap leve: subscriptions. Nao bloqueia em balance/demo.
         init = getattr(client, "initialize_session", None)
         if callable(init):
             try:
-                await init()
-            except Exception:  # noqa: BLE001
+                await asyncio.wait_for(init(), timeout=25.0)
+            except Exception as exc:  # noqa: BLE001
+                # Candles nao dependem de account_id.
                 pass
-        bal = getattr(getattr(client, "balance", None), "get_balance", None)
-        if callable(bal):
-            try:
-                await bal()
-            except Exception:  # noqa: BLE001
-                pass
+        await asyncio.sleep(0.5)
         return await coro_fn(client)
     finally:
         stop = getattr(client, "stop", None)
