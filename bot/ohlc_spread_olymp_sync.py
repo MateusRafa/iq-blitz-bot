@@ -7,7 +7,7 @@ from typing import Any
 
 from bot.ohlc_collector_eurusd import collector_eurusd
 from bot.ohlc_collector_olymp import collector_olymp
-from bot.ohlc_store import TABLE, TABLE_EURUSD
+from bot.ohlc_store import TABLE_EURUSD, TABLE_OLYMP
 from bot.olymptrade_fetch import default_store_asset
 from bot.runner import normalize_asset
 
@@ -116,6 +116,6 @@ def sync_spread_olymp_sources(
         result["ok"] = bool(result["eurusd"]["ok"])
     else:
         result["ok"] = bool(result["otc"]["ok"])
-    result["table_otc"] = TABLE
+    result["table_otc"] = TABLE_OLYMP
     result["table_eurusd"] = TABLE_EURUSD
     return result
