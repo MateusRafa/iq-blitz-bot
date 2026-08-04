@@ -178,16 +178,16 @@ async def _with_client(
     if not token:
         raise RuntimeError("Defina OLYMPTRADE_ACCESS_TOKEN no ambiente.")
 
-    client = OlympTradeClient(access_token=token)
+    log_raw = _env("OLYMPTRADE_LOG_RAW", "0").lower() in ("1", "true", "yes")
+    client = OlympTradeClient(access_token=token, log_raw_messages=log_raw)
     await client.start()
     try:
         # Bootstrap leve: subscriptions. Nao bloqueia em balance/demo.
         init = getattr(client, "initialize_session", None)
         if callable(init):
             try:
-                await asyncio.wait_for(init(), timeout=25.0)
-            except Exception as exc:  # noqa: BLE001
-                # Candles nao dependem de account_id.
+                await asyncio.wait_for(init(), timeout=20.0)
+            except Exception:  # noqa: BLE001
                 pass
         await asyncio.sleep(0.5)
         return await coro_fn(client)
