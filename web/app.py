@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
-from bot.ohlc_collector_olymp import collector_olymp
+from bot.ohlc_collector_olymp import TABLE as TABLE_OLYMP, collector_olymp
 from bot.ohlc_spread import (
     build_spread_1h,
     detect_eurusd_opens,
@@ -706,6 +706,7 @@ def _load_spread_bundle(
     limit: int,
     *,
     default_otc: str | None = None,
+    otc_table: str | None = None,
 ) -> dict:
     otc_a = normalize_asset(
         otc_asset
@@ -719,7 +720,9 @@ def _load_spread_bundle(
         or collector_eurusd.status().get("asset")
         or "EURUSD"
     )
-    otc_rows = fetch_candles(otc_a, timeframe="1h", limit=limit)
+    otc_rows = fetch_candles(
+        otc_a, timeframe="1h", limit=limit, table=otc_table or "ohlc_candles"
+    )
     eu_rows = fetch_candles(
         eu_a, timeframe="1h", limit=limit, table=TABLE_EURUSD
     )
@@ -780,7 +783,7 @@ def ohlc_spread_olymp_status(_: None = Depends(require_token)) -> dict:
             "message": str(exc)[:200],
         }
     try:
-        otc_sum = stored_summary(otc_asset, "1h")
+        otc_sum = stored_summary(otc_asset, "1h", table=TABLE_OLYMP)
     except Exception as exc:  # noqa: BLE001
         otc_sum = {
             "stored_count": None,
@@ -793,7 +796,7 @@ def ohlc_spread_olymp_status(_: None = Depends(require_token)) -> dict:
             "asset": otc_asset,
             "pair": olymp_st.get("pair"),
             "collector_running": collector_olymp.is_running(),
-            "table": "ohlc_candles",
+            "table": TABLE_OLYMP,
             "source": "olymptrade",
             **otc_sum,
         },
@@ -888,6 +891,7 @@ def ohlc_spread_olymp_backfill_dukascopy(
             days=body.days,
             match_otc=body.match_otc,
             otc_asset=body.otc_asset or _olymp_otc_asset(),
+            otc_table=TABLE_OLYMP,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -924,7 +928,9 @@ def ohlc_spread_olymp_export(
         or "EURUSD"
     )
     try:
-        otc_rows = fetch_candles(otc_a, timeframe="1h", limit=0)
+        otc_rows = fetch_candles(
+            otc_a, timeframe="1h", limit=0, table=TABLE_OLYMP
+        )
         eu_rows = fetch_candles(
             eu_a, timeframe="1h", limit=0, table=TABLE_EURUSD
         )
@@ -966,6 +972,7 @@ def ohlc_spread_olymp_series(
             eurusd_asset,
             limit,
             default_otc=_olymp_otc_asset(),
+            otc_table=TABLE_OLYMP,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -976,6 +983,7 @@ def ohlc_spread_olymp_series(
     return {
         "timeframe": "1h",
         "otc_source": "olymptrade",
+        "otc_table": TABLE_OLYMP,
         "otc_asset": payload["otc_asset"],
         "eurusd_asset": payload["eurusd_asset"],
         "eurusd_source": payload["eurusd_source"],
@@ -1009,6 +1017,7 @@ def ohlc_spread_olymp_ou(
             eurusd_asset,
             limit,
             default_otc=_olymp_otc_asset(),
+            otc_table=TABLE_OLYMP,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
