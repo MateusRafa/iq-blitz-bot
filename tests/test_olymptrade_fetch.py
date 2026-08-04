@@ -92,3 +92,29 @@ def test_extract_candles_devtools_e18_envelope():
     rows = rows_for_store(bars, asset="EURUSD_otc_olymp")
     assert len(rows) == 2
     assert rows[0]["close"] == 1.15038
+
+
+def test_rows_for_store_rejects_wrong_tf():
+    raw = [
+        {
+            "t": 1725552000,
+            "tf": 60,
+            "open": 1.0,
+            "high": 1.1,
+            "low": 0.9,
+            "close": 1.05,
+            "p": "EURUSD_OTC",
+        },
+        {
+            "t": 1725552000,
+            "tf": 3600,
+            "open": 1.1500,
+            "high": 1.1510,
+            "low": 1.1490,
+            "close": 1.1503,
+            "p": "EURUSD_OTC",
+        },
+    ]
+    rows = rows_for_store(raw, asset="EURUSD_otc_olymp", timeframe="1h")
+    assert len(rows) == 1
+    assert rows[0]["close"] == 1.1503
