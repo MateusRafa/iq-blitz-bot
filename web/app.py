@@ -86,10 +86,10 @@ class OhlcSpreadOtcHistoryBody(BaseModel):
 
 
 class OhlcSpreadDukaHistoryBody(BaseModel):
-    """Backfill Dukascopy: incremental (recente) por padrao; match_otc so se pedido."""
+    """Backfill Dukascopy alinhado ao OTC mais antigo (match_otc=True na UI)."""
 
     days: int = Field(default=14, ge=1, le=800)
-    match_otc: bool = False
+    match_otc: bool = True
     otc_asset: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -533,12 +533,17 @@ def ohlc_spread_backfill_dukascopy(
     body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
     _: None = Depends(require_token),
 ) -> dict:
-    """Puxa Dukascopy recente (incremental). match_otc=true so se pedido explicitamente."""
+    """Puxa Dukascopy desde o candle OTC Pocket mais antigo ate agora."""
+    otc_a = normalize_asset(
+        body.otc_asset
+        or os.environ.get("OHLC_SPREAD_OTC_ASSET", "").strip()
+        or "EURUSD_otc"
+    )
     try:
         pull = collector_eurusd.pull_history(
             days=body.days,
             match_otc=body.match_otc,
-            otc_asset=body.otc_asset,
+            otc_asset=otc_a,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -886,6 +891,7 @@ def ohlc_spread_olymp_backfill_dukascopy(
     body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
     _: None = Depends(require_token),
 ) -> dict:
+    """Puxa Dukascopy desde o candle OTC Olymp mais antigo ate agora."""
     try:
         pull = collector_eurusd.pull_history(
             days=body.days,
