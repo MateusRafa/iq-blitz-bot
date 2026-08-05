@@ -254,9 +254,9 @@ class OhlcCollectorEurusd:
     ) -> dict[str, Any]:
         """Puxa Dukascopy.
 
-        Padrao (match_otc=False): incremental desde o ultimo salvo
-        (overlap 48h para curar buracos recentes), limitado a `days`.
-        match_otc=True: backfill profundo desde o OTC mais antigo (raro).
+        match_otc=True: desde o candle OTC mais antigo ate agora
+        (Pocket em ohlc_candles ou Olymp em ohlc_candles_olymp).
+        match_otc=False: incremental desde o ultimo Dukascopy salvo.
         """
         ok, msg = supabase_ok()
         if not ok:
@@ -280,20 +280,24 @@ class OhlcCollectorEurusd:
         otc_tbl = otc_table or TABLE
         ndays = max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
         matched_otc = False
+        oldest_otc: datetime | None = None
         try:
             end = datetime.now(timezone.utc)
 
             if match_otc:
-                start = end - timedelta(days=ndays)
                 try:
                     oldest_otc = oldest_opened_at(otc_a, "1h", table=otc_tbl)
                 except Exception:  # noqa: BLE001
                     oldest_otc = None
-                if oldest_otc is not None:
-                    start = oldest_otc - timedelta(days=1)
-                    matched_otc = True
+                if oldest_otc is None:
+                    raise RuntimeError(
+                        f"Sem candles OTC em {otc_tbl} ({otc_a}). "
+                        "Puxe o historico OTC antes do Dukascopy."
+                    )
+                # Do mais antigo OTC (1d de folga) ate agora.
+                start = oldest_otc - timedelta(days=1)
+                matched_otc = True
             else:
-                # Incremental + overlap generoso (cura buracos sem martelar 14d).
                 start, end = self._resolve_window(
                     asset, days=ndays, prefer_incremental=True
                 )
@@ -304,8 +308,8 @@ class OhlcCollectorEurusd:
                 message=(
                     f"Dukascopy ~{span_days}d "
                     + (
-                        f"(casando OTC {otc_a})"
-                        if matched_otc
+                        f"(desde OTC {otc_a} @ {oldest_otc.date()})"
+                        if matched_otc and oldest_otc is not None
                         else "(incremental / recentes)"
                     )
                     + "…"
@@ -317,7 +321,10 @@ class OhlcCollectorEurusd:
             chunk_hours = max(
                 12, min(_env_int("DUKASCOPY_CHUNK_HOURS", 48), 72)
             )
-            if not matched_otc and span_days <= 21:
+            # Janelas longas (casar OTC): chunks curtos + menos 503.
+            if matched_otc or span_days > 21:
+                chunk_hours = min(chunk_hours, 24)
+            elif span_days <= 21:
                 chunk_hours = min(chunk_hours, 24)
 
             cursor = start
@@ -349,7 +356,20 @@ class OhlcCollectorEurusd:
                 for row in part:
                     by_t[str(row["opened_at"])] = row
                 if part:
-                    n = upsert_candles(part, table=TABLE_EURUSD)
+                    try:
+                        n = upsert_candles(part, table=TABLE_EURUSD)
+                    except Exception as exc:  # noqa: BLE001
+                        skipped += 1
+                        self._set(
+                            message=(
+                                f"Chunk {chunks} upsert falhou: "
+                                f"{str(exc)[:180]}"
+                            )
+                        )
+                        part = []
+                        time.sleep(1.5)
+                        cursor = piece_end
+                        continue
                     upserted += n
                     fetched += len(part)
                     try:
