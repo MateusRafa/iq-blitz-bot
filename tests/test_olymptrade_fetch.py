@@ -60,7 +60,7 @@ def test_timeframe_floor():
 
 
 def test_extract_candles_devtools_e18_envelope():
-    """Formato real DevTools: e:18 d=[{p, tf, candles:[OHLC...]}]."""
+    """Formato legado com tf."""
     payload = [
         {
             "p": "EURUSD_OTC",
@@ -92,6 +92,33 @@ def test_extract_candles_devtools_e18_envelope():
     rows = rows_for_store(bars, asset="EURUSD_otc_olymp")
     assert len(rows) == 2
     assert rows[0]["close"] == 1.15038
+
+
+def test_extract_candles_devtools_t_as_timeframe():
+    """DevTools real: envelope usa t=3600 (TF), nao tf; resposta em e:10."""
+    payload = [
+        {
+            "p": "EURUSD_OTC",
+            "t": 3600,
+            "candles": [
+                {
+                    "t": 1785888000,
+                    "open": 1.15277,
+                    "low": 1.15225,
+                    "high": 1.15277,
+                    "close": 1.15225,
+                }
+            ],
+        }
+    ]
+    bars = _extract_candles(payload)
+    assert bars is not None
+    assert len(bars) == 1
+    assert bars[0]["p"] == "EURUSD_OTC"
+    assert bars[0]["tf"] == 3600
+    assert bars[0]["close"] == 1.15225
+    rows = rows_for_store(bars, asset="EURUSD_otc_olymp", timeframe="1h")
+    assert len(rows) == 1
 
 
 def test_rows_for_store_rejects_wrong_tf():
