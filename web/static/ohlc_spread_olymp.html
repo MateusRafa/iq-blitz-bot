@@ -2225,16 +2225,16 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Puxando Dukascopy (incremental, overlap 48h)…";
+            "Dukascopy desde o candle OTC Olymp mais antigo até agora…";
           const st = await api("/api/ohlc-spread-olymp/backfill-dukascopy", "POST", {
-            days: 14,
-            match_otc: false,
+            days: 800,
+            match_otc: true,
             otc_asset: "EURUSD_otc_olymp",
           });
           renderStatus(st);
           const bf = st.backfill_dukascopy || {};
           document.getElementById("s-msg").textContent =
-            `Dukascopy (UTC): ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            `Dukascopy (UTC, casado Olymp): ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
             (bf.mode ? ` · ${bf.mode}` : "") +
             (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
             (bf.skipped_chunks ? ` · ${bf.skipped_chunks} pulados` : "") +
