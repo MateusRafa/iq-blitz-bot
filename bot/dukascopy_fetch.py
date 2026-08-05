@@ -280,7 +280,7 @@ def fetch_eurusd_1h_rows_for_store(
                 "high": h,
                 "low": lo,
                 "close": cl,
-                "volume": c.get("volume"),
+                "volume": float(c["volume"]) if c.get("volume") is not None else 0.0,
                 "source": "dukascopy",
                 "updated_at": now_iso,
             }
