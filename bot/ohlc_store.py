@@ -88,22 +88,72 @@ def upsert_candles(
     for i in range(0, len(rows), UPSERT_CHUNK):
         chunk = []
         for row in rows[i : i + UPSERT_CHUNK]:
-            item = dict(row)
-            # Garante NOT NULL updated_at (reconcile/prefer_body pode omitir).
-            if not item.get("updated_at"):
-                item["updated_at"] = now_iso
-            # volume null quebra se a coluna for NOT NULL em algum schema antigo;
-            # na 1m e nullable — remove chave se None para o default do DB.
-            if item.get("volume") is None:
-                item.pop("volume", None)
+            try:
+                o = float(row["open"])
+                h = float(row["high"])
+                lo = float(row["low"])
+                c = float(row["close"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # NaN/Inf quebram o PostgREST ("Value is null" / JSON invalid).
+            if not all(map(_finite, (o, h, lo, c))):
+                continue
+            opened = row.get("opened_at")
+            asset = row.get("asset")
+            tf = row.get("timeframe") or "1h"
+            if not opened or not asset:
+                continue
+            vol_raw = row.get("volume")
+            try:
+                vol = float(vol_raw) if vol_raw is not None else 0.0
+            except (TypeError, ValueError):
+                vol = 0.0
+            if not _finite(vol):
+                vol = 0.0
+            # Mesmas chaves em TODAS as linhas do chunk (evita null em bulk upsert).
+            src = (row.get("source") or "").strip()
+            if not src:
+                if table == TABLE_EURUSD:
+                    src = "dukascopy"
+                elif table == TABLE_OLYMP:
+                    src = "olymptrade"
+                else:
+                    src = "pocket"
+            item = {
+                "asset": str(asset),
+                "timeframe": str(tf),
+                "opened_at": opened,
+                "open": o,
+                "high": max(h, o, c),
+                "low": min(lo, o, c),
+                "close": c,
+                "volume": vol,
+                "source": src,
+                "updated_at": row.get("updated_at") or now_iso,
+            }
             chunk.append(item)
-        (
-            sb.table(table)
-            .upsert(chunk, on_conflict="asset,timeframe,opened_at")
-            .execute()
-        )
+        if not chunk:
+            continue
+        upsert_kw: dict[str, Any] = {"on_conflict": "asset,timeframe,opened_at"}
+        # Preferir DEFAULT do DB em campos ausentes (clientes novos).
+        try:
+            (
+                sb.table(table)
+                .upsert(chunk, default_to_null=False, **upsert_kw)
+                .execute()
+            )
+        except TypeError:
+            (
+                sb.table(table)
+                .upsert(chunk, **upsert_kw)
+                .execute()
+            )
         total += len(chunk)
     return total
+
+
+def _finite(x: float) -> bool:
+    return x == x and x not in (float("inf"), float("-inf"))
 
 
 def _opened_key(raw: Any) -> str | None:
