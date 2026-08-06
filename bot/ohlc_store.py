@@ -21,6 +21,8 @@ TABLE_EURUSD = "ohlc_candles_eurusd"  # EURUSD mercado 1h (/ohlc-spread)
 TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"  # EURUSD mercado 1D (/ohlc-spread-1d)
 TABLE_OLYMP = "ohlc_candles_olymp"  # OTC Olymptrade 1h (/ohlc-spread-olymp)
 TABLE_OLYMP_1D = "ohlc_candles_olymp_1d"  # OTC Olymptrade 1D (/ohlc-spread-olymp-1d)
+TABLE_EXPERT = "ohlc_candles_expert"  # OTC ExpertOption 1h (/ohlc-spread-expert-1d)
+TABLE_EXPERT_1D = "ohlc_candles_expert_1d"  # OTC ExpertOption 1D (/ohlc-spread-expert-1d)
 UPSERT_CHUNK = 200
 FETCH_PAGE = 1000
 
@@ -123,6 +125,10 @@ def upsert_candles(
                     src = "olymptrade"
                 elif table == TABLE_OLYMP_1D:
                     src = "olymptrade_agg"
+                elif table == TABLE_EXPERT:
+                    src = "expertoption"
+                elif table == TABLE_EXPERT_1D:
+                    src = "expertoption_agg"
                 else:
                     src = "pocket"
             item = {
