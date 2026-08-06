@@ -37,3 +37,4 @@ def test_parse_single_column_excel_like_csv():
     assert len(rows) == 1
     assert rows[0]["close"] == 1.1523
     assert rows[0]["open"] == 1.1557
+    
