@@ -65,6 +65,7 @@ class OhlcCollectorEurusd:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._pull_lock = threading.Lock()
+        self._pull_started_at: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._asset = _default_asset()
@@ -88,9 +89,62 @@ class OhlcCollectorEurusd:
             "stored_count": None,
             "stored_last": None,
             "stored_err": None,
+            "pull_busy": False,
         }
         self._refresh_supabase_flag()
         self._refresh_stored()
+
+    def is_pull_busy(self) -> bool:
+        return self._pull_lock.locked()
+
+    def release_pull_lock(self, *, force: bool = False) -> bool:
+        """Libera lock de puxada travado (ex.: request morto / crash).
+
+        Sem force: so libera se o lock estiver preso ha > STALE segundos.
+        """
+        stale_sec = max(60, _env_int("DUKASCOPY_PULL_STALE_SEC", 900))
+        if not self._pull_lock.locked():
+            self._pull_started_at = None
+            return False
+        started = self._pull_started_at
+        age = (time.time() - started) if started else None
+        if not force and age is not None and age < stale_sec:
+            return False
+        try:
+            self._pull_lock.release()
+        except RuntimeError:
+            return False
+        self._pull_started_at = None
+        self._set(
+            message=(
+                f"Lock Dukascopy liberado"
+                + (f" (preso {int(age)}s)" if age is not None else "")
+            ),
+            phase="idle" if not self.is_running() else "waiting",
+            error=None,
+        )
+        return True
+
+    def _acquire_pull(self) -> None:
+        """Tenta lock; se preso ha muito tempo, libera e tenta de novo."""
+        if self._pull_lock.acquire(blocking=False):
+            self._pull_started_at = time.time()
+            return
+        if self.release_pull_lock(force=False):
+            if self._pull_lock.acquire(blocking=False):
+                self._pull_started_at = time.time()
+                return
+        raise RuntimeError(
+            "Ja existe uma puxada Dukascopy em andamento. Aguarde "
+            "alguns minutos ou reinicie o servico."
+        )
+
+    def _release_pull(self) -> None:
+        self._pull_started_at = None
+        try:
+            self._pull_lock.release()
+        except RuntimeError:
+            pass
 
     def _refresh_supabase_flag(self) -> None:
         ok, msg = supabase_ok()
@@ -115,6 +169,7 @@ class OhlcCollectorEurusd:
             out["running"] = self.is_running()
             out["asset"] = self._asset
             out["source"] = SOURCE
+            out["pull_busy"] = self._pull_lock.locked()
             return out
 
     def set_asset(self, asset: str) -> dict[str, Any]:
@@ -188,10 +243,7 @@ class OhlcCollectorEurusd:
         ok, msg = supabase_ok()
         if not ok:
             raise RuntimeError(msg)
-        if not self._pull_lock.acquire(blocking=False):
-            raise RuntimeError(
-                "Ja existe uma puxada Dukascopy em andamento. Aguarde."
-            )
+        self._acquire_pull()
         asset = self._asset
         upserted = 0
         try:
@@ -235,7 +287,7 @@ class OhlcCollectorEurusd:
             )
             raise
         finally:
-            self._pull_lock.release()
+            self._release_pull()
         st = self.status()
         st["pull"] = {
             "upserted": upserted,
@@ -262,10 +314,7 @@ class OhlcCollectorEurusd:
         ok, msg = supabase_ok()
         if not ok:
             raise RuntimeError(msg)
-        if not self._pull_lock.acquire(blocking=False):
-            raise RuntimeError(
-                "Ja existe uma puxada Dukascopy em andamento. Aguarde."
-            )
+        self._acquire_pull()
         asset = self._asset
         upserted = 0
         fetched = 0
@@ -435,7 +484,7 @@ class OhlcCollectorEurusd:
             )
             raise
         finally:
-            self._pull_lock.release()
+            self._release_pull()
 
         st = self.status()
         st["pull"] = {
@@ -603,6 +652,7 @@ class OhlcCollectorEurusd:
             try:
                 if not self._pull_lock.acquire(blocking=False):
                     continue
+                self._pull_started_at = time.time()
                 try:
                     self._set(
                         phase="live",
@@ -627,7 +677,7 @@ class OhlcCollectorEurusd:
                         ),
                     )
                 finally:
-                    self._pull_lock.release()
+                    self._release_pull()
             except Exception as exc:  # noqa: BLE001
                 self._set(
                     phase="waiting",
@@ -652,6 +702,7 @@ class OhlcCollectorEurusd:
                 if not self._pull_lock.acquire(blocking=False):
                     self._set(message="Backfill adiado: puxada manual em curso")
                 else:
+                    self._pull_started_at = time.time()
                     try:
                         n = self._sync_dukascopy(
                             asset,
@@ -661,7 +712,7 @@ class OhlcCollectorEurusd:
                         )
                         self._set(message=f"Sync Dukascopy 1h: {n} velas")
                     finally:
-                        self._pull_lock.release()
+                        self._release_pull()
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._snap["per_tf"]["1h"] = {
@@ -687,6 +738,7 @@ class OhlcCollectorEurusd:
                     if not self._pull_lock.acquire(blocking=False):
                         self._set(message="Fetch pulado: puxada manual em curso")
                         continue
+                    self._pull_started_at = time.time()
                     try:
                         n = self._sync_dukascopy(
                             asset,
@@ -699,7 +751,7 @@ class OhlcCollectorEurusd:
                             error=None,
                         )
                     finally:
-                        self._pull_lock.release()
+                        self._release_pull()
                 except Exception as exc:  # noqa: BLE001
                     with self._lock:
                         cur = self._snap["per_tf"].get("1h", {})
