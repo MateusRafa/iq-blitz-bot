@@ -34,8 +34,12 @@ from bot.ohlc_store import (
     fetch_candles,
     fetch_candles_range,
     stored_summary,
-    TABLE_EURUSD_1D,
 )
+
+try:
+    from bot.ohlc_store import TABLE_EURUSD_1D
+except ImportError:  # pragma: no cover
+    TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"
 from bot.olymptrade_fetch import default_store_asset as olymp_default_otc_asset
 from bot.olymptrade_fetch import olymptrade_available
 from bot.runner import MIN_DURATION, normalize_asset, runner
