@@ -20,6 +20,7 @@ TABLE_1D = "ohlc_candles_1d"  # coletor diario OTC (/ohlc-1d)
 TABLE_EURUSD = "ohlc_candles_eurusd"  # EURUSD mercado 1h (/ohlc-spread)
 TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"  # EURUSD mercado 1D (/ohlc-spread-1d)
 TABLE_OLYMP = "ohlc_candles_olymp"  # OTC Olymptrade 1h (/ohlc-spread-olymp)
+TABLE_OLYMP_1D = "ohlc_candles_olymp_1d"  # OTC Olymptrade 1D (/ohlc-spread-olymp-1d)
 UPSERT_CHUNK = 200
 FETCH_PAGE = 1000
 
@@ -120,6 +121,8 @@ def upsert_candles(
                     src = "dukascopy_agg"
                 elif table == TABLE_OLYMP:
                     src = "olymptrade"
+                elif table == TABLE_OLYMP_1D:
+                    src = "olymptrade_agg"
                 else:
                     src = "pocket"
             item = {
