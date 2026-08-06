@@ -83,9 +83,13 @@
       }
       .lg-otc::before { background: #22d3ee; }
       .lg-eu::before { background: #fbbf24; }
+      .lg-olymp::before { background: #4ade80; }
+      .lg-olymp-spread::before { background: #4ade80; }
       .lg-spread::before { background: #a78bfa; }
       .lg-wknd::before { background: #f43f5e; }
       .lg-open::before { background: #22d3ee; }
+      .lg-olymp[hidden],
+      .lg-olymp-spread[hidden] { display: none; }
       .chart-label {
         font-size: 0.8rem;
         color: #94a3b8;
@@ -150,6 +154,7 @@
               <button type="button" class="btn btn-start" id="btn-duka-history">Puxar histórico Dukascopy</button>
               <button type="button" class="btn btn-apply" id="btn-download">Baixar dados</button>
               <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
+              <button type="button" class="btn btn-mode" id="btn-olymp" title="Carrega OTC Olymp 1D e sobrepõe no gráfico">Mostrar Olymp</button>
             </div>
             <div id="cmd-erro" class="erro" hidden></div>
             <div class="status-grid">
@@ -285,6 +290,7 @@
             <div class="legend">
               <span class="lg-otc">EURUSD_otc (Pocket)</span>
               <span class="lg-eu">EURUSD (Dukascopy)</span>
+              <span class="lg-olymp" id="lg-olymp" hidden>EURUSD_otc (Olymp)</span>
             </div>
             <p class="message" id="chart-meta">—</p>
 
@@ -311,7 +317,8 @@
             </div>
             <p class="draw-hint" id="draw-hint-spread"></p>
             <div class="legend">
-              <span class="lg-spread">Spread</span>
+              <span class="lg-spread">Spread (Pocket)</span>
+              <span class="lg-olymp-spread" id="lg-olymp-spread" hidden>Spread (Olymp)</span>
               <span class="lg-wknd" id="lg-wknd">fora do horário EURUSD</span>
               <span class="lg-open" id="lg-open">abertura diária EURUSD</span>
             </div>
@@ -327,6 +334,7 @@
     <script>
       const TOKEN_KEY = "iq_blitz_control_token";
       const LAYOUT_KEY = "iq_blitz_spread_1d_layout";
+      const OLYMP_KEY = "iq_blitz_spread_1d_show_olymp";
       const LINK_KEY = "iq_blitz_spread_1d_link";
       const AFTER_HOURS_KEY = "iq_blitz_spread_1d_after_hours";
       const OPENS_KEY = "iq_blitz_spread_1d_opens";
@@ -413,9 +421,12 @@
       let spreadChart = null;
       let seriesOtc = null;
       let seriesEu = null;
+      let seriesOlymp = null;
       let seriesOtcSplit = null;
       let seriesEuSplit = null;
+      let seriesOlympSplit = null;
       let seriesSpread = null;
+      let seriesOlympSpread = null;
       let seriesWeekend = null;
       let lastMeta = "";
       let eurusdOpens = [];
@@ -426,7 +437,12 @@
       let syncingCharts = false;
       let lastOtcCandles = [];
       let lastEuCandles = [];
+      let lastOlympCandles = [];
+      let lastOlympSpreadPoints = [];
+      let lastOlympAsset = "";
       let lastSpreadPoints = [];
+      let olympVisible = localStorage.getItem(OLYMP_KEY) === "1";
+      let olympLoading = false;
       let userLines = { price: [], spread: [] };
       try {
         const rawDraw = localStorage.getItem(DRAW_KEY);
@@ -552,8 +568,10 @@
       function applyPriceData() {
         if (seriesOtc) seriesOtc.setData(priceData(lastOtcCandles));
         if (seriesEu) seriesEu.setData(priceData(lastEuCandles));
+        if (seriesOlymp) seriesOlymp.setData(priceData(lastOlympCandles));
         if (seriesOtcSplit) seriesOtcSplit.setData(priceData(lastOtcCandles));
         if (seriesEuSplit) seriesEuSplit.setData(priceData(lastEuCandles));
+        if (seriesOlympSplit) seriesOlympSplit.setData(priceData(lastOlympCandles));
       }
 
       function recreatePriceSeries() {
@@ -562,12 +580,20 @@
           if (priceChart) {
             removeSeriesSafe(priceChart, seriesOtc);
             removeSeriesSafe(priceChart, seriesEu);
+            removeSeriesSafe(priceChart, seriesOlymp);
             seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
             seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
+            seriesOlymp = olympVisible
+              ? addPriceSeries(priceChart, "#4ade80", "#16a34a")
+              : null;
           }
           if (otcChart) {
             removeSeriesSafe(otcChart, seriesOtcSplit);
+            removeSeriesSafe(otcChart, seriesOlympSplit);
             seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
+            seriesOlympSplit = olympVisible
+              ? addPriceSeries(otcChart, "#4ade80", "#16a34a")
+              : null;
           }
           if (euChart) {
             removeSeriesSafe(euChart, seriesEuSplit);
@@ -576,6 +602,130 @@
           applyPriceData();
         } finally {
           restoringRange = false;
+        }
+      }
+
+      function syncOlympLegend() {
+        const lg = document.getElementById("lg-olymp");
+        const lgS = document.getElementById("lg-olymp-spread");
+        const btn = document.getElementById("btn-olymp");
+        if (lg) lg.hidden = !olympVisible;
+        if (lgS) lgS.hidden = !olympVisible;
+        if (btn) {
+          btn.classList.toggle("active", olympVisible);
+          btn.textContent = olympVisible ? "Ocultar Olymp" : "Mostrar Olymp";
+          btn.disabled = olympLoading;
+        }
+      }
+
+      function ensureOlympSeries() {
+        if (!ensureCharts()) return false;
+        if (!olympVisible) return false;
+        if (priceChart && !seriesOlymp) {
+          seriesOlymp = addPriceSeries(priceChart, "#4ade80", "#16a34a");
+        }
+        if (layout === "split" && otcChart && !seriesOlympSplit) {
+          seriesOlympSplit = addPriceSeries(otcChart, "#4ade80", "#16a34a");
+        }
+        if (spreadChart && !seriesOlympSpread) {
+          seriesOlympSpread = spreadChart.addLineSeries({
+            color: "#4ade80",
+            lineWidth: 2,
+            lineStyle: 2,
+            priceFormat: priceFmt(),
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+        }
+        return true;
+      }
+
+      function clearOlympFromCharts() {
+        removeSeriesSafe(priceChart, seriesOlymp);
+        removeSeriesSafe(otcChart, seriesOlympSplit);
+        removeSeriesSafe(spreadChart, seriesOlympSpread);
+        seriesOlymp = null;
+        seriesOlympSplit = null;
+        seriesOlympSpread = null;
+      }
+
+      function applyOlympOverlay() {
+        syncOlympLegend();
+        if (!olympVisible) {
+          clearOlympFromCharts();
+          return;
+        }
+        if (!ensureOlympSeries()) return;
+        if (seriesOlymp) seriesOlymp.setData(priceData(lastOlympCandles));
+        if (seriesOlympSplit) seriesOlympSplit.setData(priceData(lastOlympCandles));
+        if (seriesOlympSpread) seriesOlympSpread.setData(lastOlympSpreadPoints);
+      }
+
+      async function fetchOlympSeries({ backfillIfEmpty = true } = {}) {
+        let data = await api("/api/ohlc-spread-olymp-1d/series?limit=0");
+        const empty = !(data.otc && data.otc.length);
+        if (empty && backfillIfEmpty) {
+          const meta = document.getElementById("chart-meta");
+          if (meta) {
+            meta.textContent =
+              (lastMeta ? lastMeta + " · " : "") +
+              "Agregando Olymp 1D a partir do 1h…";
+          }
+          await api("/api/ohlc-spread-olymp-1d/backfill-otc", "POST", {
+            days: 400,
+          });
+          data = await api("/api/ohlc-spread-olymp-1d/series?limit=0");
+        }
+        lastOlympCandles = toCandle(data.otc);
+        lastOlympSpreadPoints = (data.spread || []).map((p) => ({
+          time: p.time,
+          value: p.spread,
+        }));
+        lastOlympAsset = data.otc_asset || "Olymp";
+        return data;
+      }
+
+      async function setOlympVisible(next, { reload = true } = {}) {
+        olympVisible = !!next;
+        localStorage.setItem(OLYMP_KEY, olympVisible ? "1" : "0");
+        syncOlympLegend();
+        if (!olympVisible) {
+          clearOlympFromCharts();
+          const meta = document.getElementById("chart-meta");
+          if (meta && lastMeta) meta.textContent = lastMeta;
+          return;
+        }
+        if (!reload && lastOlympCandles.length) {
+          applyOlympOverlay();
+          return;
+        }
+        olympLoading = true;
+        syncOlympLegend();
+        try {
+          const data = await fetchOlympSeries({ backfillIfEmpty: true });
+          applyOlympOverlay();
+          const meta = document.getElementById("chart-meta");
+          if (meta) {
+            meta.textContent =
+              (lastMeta || "") +
+              " · Olymp " +
+              lastOlympAsset +
+              " " +
+              lastOlympCandles.length +
+              " velas" +
+              (lastOlympSpreadPoints.length
+                ? " · spread Olymp " + lastOlympSpreadPoints.length
+                : "");
+            if (!lastOlympCandles.length) {
+              meta.textContent =
+                (lastMeta || "") +
+                " · Olymp sem velas 1D (puxa histórico no /ohlc-spread-olymp-1d).";
+            }
+          }
+          return data;
+        } finally {
+          olympLoading = false;
+          syncOlympLegend();
         }
       }
 
@@ -1058,6 +1208,9 @@
           priceChart = LightweightCharts.createChart(el, chartOpts(el));
           seriesOtc = addPriceSeries(priceChart, "#22d3ee", "#0891b2");
           seriesEu = addPriceSeries(priceChart, "#fbbf24", "#d97706");
+          if (olympVisible) {
+            seriesOlymp = addPriceSeries(priceChart, "#4ade80", "#16a34a");
+          }
         }
         if (layout === "split") {
           if (!otcChart) {
@@ -1065,7 +1218,12 @@
             if (el) {
               otcChart = LightweightCharts.createChart(el, chartOpts(el));
               seriesOtcSplit = addPriceSeries(otcChart, "#22d3ee", "#0891b2");
+              if (olympVisible) {
+                seriesOlympSplit = addPriceSeries(otcChart, "#4ade80", "#16a34a");
+              }
             }
+          } else if (olympVisible && !seriesOlympSplit) {
+            seriesOlympSplit = addPriceSeries(otcChart, "#4ade80", "#16a34a");
           }
           if (!euChart) {
             const el = document.getElementById("eu-chart");
@@ -1354,6 +1512,7 @@
           restoringRange = true;
           try {
             applyPriceData();
+            applyOlympOverlay();
           } finally {
             restoringRange = false;
           }
@@ -1494,6 +1653,21 @@
       async function loadCharts() {
         const data = await api("/api/ohlc-spread-1d/series?limit=0");
         applySeries(data);
+        if (olympVisible) {
+          try {
+            await setOlympVisible(true, { reload: true });
+          } catch (e) {
+            const meta = document.getElementById("chart-meta");
+            if (meta) {
+              meta.textContent =
+                (lastMeta || "") +
+                " · Olymp: " +
+                (e.message || e);
+            }
+          }
+        } else {
+          syncOlympLegend();
+        }
         try {
           await loadOu();
         } catch (e) {
@@ -2057,6 +2231,18 @@
       }
       if (btnFit) {
         btnFit.addEventListener("click", () => fitAll(true));
+      }
+      const btnOlymp = document.getElementById("btn-olymp");
+      if (btnOlymp) {
+        syncOlympLegend();
+        btnOlymp.addEventListener("click", async () => {
+          try {
+            setCmdErro("");
+            await setOlympVisible(!olympVisible, { reload: true });
+          } catch (e) {
+            setCmdErro(e.message || String(e));
+          }
+        });
       }
       if (btnAfterHours) {
         btnAfterHours.addEventListener("click", () =>
