@@ -42,6 +42,19 @@ def _key_hour(raw: Any) -> str | None:
     return ts.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _key_day(raw: Any, *, pocket_offset: int | None = None) -> str | None:
+    """Dia civil Pocket (UTC−3 por padrao) — alinhado as velas D1."""
+    ts = _parse_ts(raw)
+    if ts is None:
+        return None
+    off = (
+        int(_env_float("POCKET_TIME_OFFSET", -10800))
+        if pocket_offset is None
+        else int(pocket_offset)
+    )
+    return (ts + timedelta(seconds=off)).date().isoformat()
+
+
 def detect_eurusd_opens(
     eurusd_rows: list[dict[str, Any]],
     *,
@@ -152,6 +165,103 @@ def build_spread_1h(
                 "mode": mode,
                 "after_hours": after_hours,
                 "weekend": is_weekend or after_hours,
+            }
+        )
+    return points
+
+
+def build_spread_1d(
+    otc_rows: list[dict[str, Any]],
+    eurusd_rows: list[dict[str, Any]],
+    *,
+    pocket_offset: int | None = None,
+) -> list[dict[str, Any]]:
+    """Spread diario: alinhado ao dia civil das velas OTC D1.
+
+    Mesmo contrato de build_spread_1h (time, spread, mode paired|carry, weekend).
+    Fins de semana OTC mantem carry do ultimo close EURUSD de sessao.
+    """
+    off = (
+        int(_env_float("POCKET_TIME_OFFSET", -10800))
+        if pocket_offset is None
+        else int(pocket_offset)
+    )
+    by_eu: dict[str, dict[str, Any]] = {}
+    for r in eurusd_rows:
+        k = _key_day(r.get("opened_at"), pocket_offset=off)
+        if k:
+            by_eu[k] = r
+
+    points: list[dict[str, Any]] = []
+    last_eu_close: float | None = None
+
+    otc_sorted = sorted(
+        otc_rows, key=lambda r: str(r.get("opened_at") or "")
+    )
+    eu_sorted = sorted(
+        eurusd_rows, key=lambda r: str(r.get("opened_at") or "")
+    )
+    eu_i = 0
+
+    for row in otc_sorted:
+        ts = _parse_ts(row.get("opened_at"))
+        if ts is None:
+            continue
+        key = _key_day(row.get("opened_at"), pocket_offset=off)
+        if not key:
+            continue
+        try:
+            otc_c = float(row["close"])
+        except (TypeError, ValueError, KeyError):
+            continue
+
+        while eu_i < len(eu_sorted):
+            eu_ts = _parse_ts(eu_sorted[eu_i].get("opened_at"))
+            if eu_ts is None or eu_ts > ts:
+                break
+            try:
+                last_eu_close = float(eu_sorted[eu_i]["close"])
+            except (TypeError, ValueError, KeyError):
+                pass
+            eu_i += 1
+
+        # Dia civil Pocket do ponto OTC.
+        try:
+            y, mo, d = (int(x) for x in key.split("-"))
+            weekday = datetime(y, mo, d, tzinfo=timezone.utc).weekday()
+        except ValueError:
+            weekday = ts.weekday()
+        is_weekend = weekday >= 5
+        paired = key in by_eu
+
+        if paired:
+            try:
+                eu_c = float(by_eu[key]["close"])
+            except (TypeError, ValueError, KeyError):
+                eu_c = last_eu_close
+            mode = "paired"
+        else:
+            eu_c = last_eu_close
+            mode = "carry"
+
+        if eu_c is None:
+            continue
+
+        if paired:
+            last_eu_close = eu_c
+
+        after_hours = mode == "carry"
+        points.append(
+            {
+                "time": int(ts.timestamp()),
+                "opened_at": ts.isoformat(),
+                "spread": otc_c - eu_c,
+                "otc_close": otc_c,
+                "eurusd_close": eu_c,
+                "mode": mode,
+                "after_hours": after_hours,
+                "weekend": is_weekend or after_hours,
+                "day": key,
             }
         )
     return points
