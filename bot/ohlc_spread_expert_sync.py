@@ -274,4 +274,3 @@ def sync_spread_expert_sources(
 
     return result
 
-
