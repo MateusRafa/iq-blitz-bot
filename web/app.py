@@ -8,11 +8,13 @@ import secrets
 import zipfile
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from bot.eurusd_daily_import import SOURCE_LABEL as EURUSD_IMPORT_SOURCE
+from bot.eurusd_daily_import import parse_eurusd_daily_bytes
 from bot.ohlc_collector import collector
 from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
@@ -39,6 +41,7 @@ from bot.ohlc_store import (
     fetch_candles,
     fetch_candles_range,
     stored_summary,
+    upsert_candles,
 )
 
 try:
@@ -1092,6 +1095,46 @@ def _spread_1d_otc_asset(override: str | None = None) -> str:
     )
 
 
+# Preferir Dukascopy agregado / import manual se houver misturado com outras fontes.
+_EURUSD_1D_PREFERRED_SOURCES = frozenset(
+    {"dukascopy_agg", EURUSD_IMPORT_SOURCE, "investing_csv"}
+)
+
+
+def _prefer_eurusd_1d_rows(eu_rows: list) -> tuple[list, str]:
+    preferred = [
+        r
+        for r in eu_rows
+        if str(r.get("source") or "") in _EURUSD_1D_PREFERRED_SOURCES
+    ]
+    if preferred:
+        # Se ha import manual e dukascopy, preferir o mais recente por dia via
+        # ordem natural do upsert; aqui usa so preferred (ambas fontes validas).
+        # Preferencia: manual_import sobrepoe dukascopy_agg no mesmo dia.
+        by_day: dict[str, dict] = {}
+        for r in preferred:
+            key = str(r.get("opened_at") or "")[:19]
+            src = str(r.get("source") or "")
+            prev = by_day.get(key)
+            if prev is None:
+                by_day[key] = r
+                continue
+            prev_src = str(prev.get("source") or "")
+            if src == EURUSD_IMPORT_SOURCE and prev_src != EURUSD_IMPORT_SOURCE:
+                by_day[key] = r
+        rows = sorted(by_day.values(), key=lambda x: str(x.get("opened_at") or ""))
+        sources = {str(r.get("source") or "") for r in rows}
+        if EURUSD_IMPORT_SOURCE in sources and "dukascopy_agg" in sources:
+            eu_source = f"{EURUSD_IMPORT_SOURCE}+dukascopy_agg"
+        elif EURUSD_IMPORT_SOURCE in sources:
+            eu_source = EURUSD_IMPORT_SOURCE
+        else:
+            eu_source = next(iter(sources)) if sources else "unknown"
+        return rows, eu_source
+    eu_source = (eu_rows[-1].get("source") if eu_rows else None) or "unknown"
+    return eu_rows, str(eu_source)
+
+
 def _load_spread_1d_bundle(
     otc_asset: str | None,
     eurusd_asset: str | None,
@@ -1109,13 +1152,7 @@ def _load_spread_1d_bundle(
     eu_rows = fetch_candles(
         eu_a, timeframe="1d", limit=limit, table=TABLE_EURUSD_1D
     )
-    # Preferir Dukascopy agregado se houver misturado com outras fontes.
-    dukas = [r for r in eu_rows if str(r.get("source") or "") == "dukascopy_agg"]
-    if dukas:
-        eu_rows = dukas
-        eu_source = "dukascopy_agg"
-    else:
-        eu_source = (eu_rows[-1].get("source") if eu_rows else None) or "unknown"
+    eu_rows, eu_source = _prefer_eurusd_1d_rows(eu_rows)
     try:
         spread = build_spread_1d(otc_rows, eu_rows)
         opens = detect_eurusd_opens(eu_rows)
@@ -1281,6 +1318,70 @@ def ohlc_spread_1d_backfill_dukascopy(
     return st
 
 
+@app.post("/api/ohlc-spread-1d/import-eurusd")
+async def ohlc_spread_1d_import_eurusd(
+    file: UploadFile = File(...),
+    _: None = Depends(require_token),
+) -> dict:
+    """Importa CSV/Excel diario EURUSD (Investing.com PT) → ohlc_candles_eurusd_1d."""
+    filename = file.filename or "upload.csv"
+    lower = filename.lower()
+    if not (
+        lower.endswith(".csv")
+        or lower.endswith(".txt")
+        or lower.endswith(".xlsx")
+        or lower.endswith(".xls")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Use ficheiro .csv, .txt ou .xlsx (EURUSD diario).",
+        )
+    if lower.endswith(".xls") and not lower.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=400,
+            detail="Formato .xls antigo nao suportado — salve como .xlsx ou .csv.",
+        )
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Ficheiro vazio.")
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Ficheiro demasiado grande (>12MB).")
+
+    eu_a = normalize_asset(
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip() or "EURUSD"
+    )
+    try:
+        rows = parse_eurusd_daily_bytes(raw, filename=filename, asset=eu_a)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail=f"Falha ao ler ficheiro: {exc}"
+        ) from exc
+
+    try:
+        upserted = upsert_candles(rows, table=TABLE_EURUSD_1D) if rows else 0
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"Falha ao gravar no Supabase: {exc}"
+        ) from exc
+
+    summary = stored_summary(eu_a, "1d", table=TABLE_EURUSD_1D)
+    return {
+        "ok": True,
+        "filename": filename,
+        "asset": eu_a,
+        "timeframe": "1d",
+        "table": TABLE_EURUSD_1D,
+        "source": EURUSD_IMPORT_SOURCE,
+        "parsed": len(rows),
+        "upserted": upserted,
+        "first": rows[0]["opened_at"] if rows else None,
+        "last": rows[-1]["opened_at"] if rows else None,
+        "stored": summary,
+    }
+
+
 @app.get("/api/ohlc-spread-1d/export")
 def ohlc_spread_1d_export(
     days: int = 120,
@@ -1425,12 +1526,7 @@ def _load_spread_olymp_1d_bundle(
     eu_rows = fetch_candles(
         eu_a, timeframe="1d", limit=limit, table=TABLE_EURUSD_1D
     )
-    dukas = [r for r in eu_rows if str(r.get("source") or "") == "dukascopy_agg"]
-    if dukas:
-        eu_rows = dukas
-        eu_source = "dukascopy_agg"
-    else:
-        eu_source = (eu_rows[-1].get("source") if eu_rows else None) or "unknown"
+    eu_rows, eu_source = _prefer_eurusd_1d_rows(eu_rows)
     try:
         spread = build_spread_1d(otc_rows, eu_rows)
         opens = detect_eurusd_opens(eu_rows)
