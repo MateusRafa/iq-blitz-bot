@@ -2210,18 +2210,18 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Puxando histórico Expert 1h e agregando D1… pode demorar alguns minutos.";
+            "Puxando ExpertOption 1D via WS… (pode demorar).";
           const st = await api("/api/ohlc-spread-expert-1d/backfill-otc", "POST", {
-            days: 800,
+            days: 400,
             asset: "EURUSD_otc_expert",
           });
           renderStatus(st);
           const bf = st.backfill_otc || {};
           document.getElementById("s-msg").textContent =
-            `Histórico Expert D1: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
-            (bf.pages != null ? ` · ${bf.pages} páginas` : "") +
-            (bf.oldest ? ` · ${bf.oldest} → ${bf.newest || "?"}` : "") +
-            (bf.stored_oldest ? ` · mais antigo salvo: ${bf.stored_oldest}` : "");
+            `Expert 1D [${bf.mode || "?"}]: ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
+            (bf.native_fetched != null ? ` · nativo ${bf.native_fetched}` : "") +
+            (bf.error ? ` · erro: ${bf.error}` : "");
+          if (bf.error && !(bf.fetched > 0)) setCmdErro(bf.error);
           await loadCharts();
         } catch (e) {
           setCmdErro(e.message || String(e));
