@@ -226,15 +226,19 @@ def sync_spread_1d_sources(
     if pull_dukascopy:
         try:
             tip_h = min(14, max(3, lookback // 8))
+            tip_err = None
             try:
-                if collector_eurusd.status().get("asset") != eu_a:
-                    try:
-                        collector_eurusd.set_asset(eu_a)
-                    except RuntimeError:
-                        pass
-                collector_eurusd.pull_now(days=tip_h)
-            except Exception:  # noqa: BLE001
-                pass
+                if collector_eurusd.is_pull_busy():
+                    collector_eurusd.release_pull_lock(force=False)
+                if not collector_eurusd.is_pull_busy():
+                    if collector_eurusd.status().get("asset") != eu_a:
+                        try:
+                            collector_eurusd.set_asset(eu_a)
+                        except RuntimeError:
+                            pass
+                    collector_eurusd.pull_now(days=tip_h)
+            except Exception as exc:  # noqa: BLE001
+                tip_err = str(exc)[:200]
 
             recon = reconcile_eurusd_1d_to_otc(
                 otc_asset=otc_a, eurusd_asset=eu_a, days=lookback
@@ -242,7 +246,7 @@ def sync_spread_1d_sources(
             result["eurusd"] = {
                 "ok": bool(recon.get("ok")),
                 "upserted": int(recon.get("upserted") or 0),
-                "error": None,
+                "error": tip_err,
                 "asset": eu_a,
                 "source": SOURCE_EU_1D,
                 "days": lookback,
@@ -252,9 +256,16 @@ def sync_spread_1d_sources(
                     "otc_session_days": recon.get("otc_session_days"),
                     "otc_weekend_kept": recon.get("otc_weekend_kept"),
                     "otc_in_window": recon.get("otc_in_window"),
+                    "daily_built": (recon.get("rebuild") or {}).get("daily_built"),
                 },
             }
             result["reconcile"] = recon
+            # ok se agregou algo ou nao havia gaps
+            if int(recon.get("upserted") or 0) > 0 or int(
+                recon.get("gaps_remaining") or 0
+            ) == 0:
+                result["eurusd"]["ok"] = True
+                result["eurusd"]["error"] = tip_err
         except Exception as exc:  # noqa: BLE001
             result["eurusd"] = {
                 "ok": False,
@@ -280,48 +291,108 @@ def backfill_dukascopy_1d(
     days: int | None = None,
     match_otc: bool = True,
     otc_asset: str | None = None,
+    force_unlock: bool = True,
 ) -> dict[str, Any]:
-    """Puxa Dukascopy 1h (casado ao OTC D1) e reconstroi EURUSD D1."""
+    """Monta EURUSD D1 a partir do 1h ja salvo; so baixa Dukascopy se faltar.
+
+    Ordem:
+      1) libera lock preso (opcional)
+      2) agrega ohlc_candles_eurusd → ohlc_candles_eurusd_1d
+      3) se ainda houver buracos vs OTC D1, tenta tip/history 1h e re-agrega
+    """
     otc_a = normalize_asset(otc_asset or _otc_asset())
     eu_a = _eurusd_asset()
     lookback = max(1, min(int(days or 120), 800))
 
-    pull = collector_eurusd.pull_history(
-        days=lookback,
-        match_otc=match_otc,
-        otc_asset=otc_a,
-        otc_table=TABLE_1D,
-        otc_timeframe=TIMEFRAME,
-    )
-    span = lookback
-    if isinstance(pull, dict):
-        info = pull.get("pull") or pull
-        if info.get("from") and info.get("to"):
-            try:
-                span = lookback
-            except Exception:  # noqa: BLE001
-                pass
-        if info.get("days"):
-            try:
-                span = max(span, int(info["days"]))
-            except (TypeError, ValueError):
-                pass
+    unlocked = False
+    if force_unlock:
+        unlocked = bool(collector_eurusd.release_pull_lock(force=True))
+
+    # Janela: cobrir OTC D1 (ou lookback).
+    from bot.ohlc_store import oldest_opened_at
+
+    oldest_otc = None
+    try:
+        oldest_otc = oldest_opened_at(otc_a, TIMEFRAME, table=TABLE_1D)
+    except Exception:  # noqa: BLE001
+        oldest_otc = None
+    if match_otc and oldest_otc is not None:
+        span = int(
+            (datetime.now(timezone.utc) - oldest_otc).total_seconds() // 86400
+        ) + 2
+        lookback = max(lookback, min(span, 800))
 
     rebuilt = rebuild_eurusd_1d_from_hourly(
-        eurusd_asset=eu_a, days=max(span, lookback), include_today=True
+        eurusd_asset=eu_a, days=lookback, include_today=True
     )
-    hourly_info = pull.get("pull") if isinstance(pull, dict) else None
+    hourly_pull: dict[str, Any] | None = None
+    tip_error: str | None = None
+
+    # Se agregacao vazia ou bem menor que OTC, tenta completar 1h.
+    otc_n = int(
+        (stored_summary(otc_a, TIMEFRAME, table=TABLE_1D).get("stored_count") or 0)
+    )
+    daily_n = int(rebuilt.get("daily_built") or 0)
+    need_more = daily_n < max(5, int(otc_n * 0.5))
+
+    if need_more and not collector_eurusd.is_pull_busy():
+        try:
+            # Tip curto primeiro (rapido).
+            tip = collector_eurusd.pull_now(days=min(21, lookback))
+            hourly_pull = tip.get("pull") if isinstance(tip, dict) else None
+            rebuilt = rebuild_eurusd_1d_from_hourly(
+                eurusd_asset=eu_a, days=lookback, include_today=True
+            )
+            daily_n = int(rebuilt.get("daily_built") or 0)
+        except Exception as exc:  # noqa: BLE001
+            tip_error = str(exc)[:300]
+
+    if (
+        need_more
+        and daily_n < max(5, int(otc_n * 0.5))
+        and not collector_eurusd.is_pull_busy()
+    ):
+        try:
+            pull = collector_eurusd.pull_history(
+                days=lookback,
+                match_otc=False,  # janela ja calculada; evita OTC 1h
+                otc_asset=otc_a,
+                otc_table=TABLE_1D,
+                otc_timeframe=TIMEFRAME,
+            )
+            hourly_pull = pull.get("pull") if isinstance(pull, dict) else hourly_pull
+            rebuilt = rebuild_eurusd_1d_from_hourly(
+                eurusd_asset=eu_a, days=lookback, include_today=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            tip_error = (tip_error + "; " if tip_error else "") + str(exc)[:300]
+
+    # Reconcile final (so agrega de novo + conta gaps).
+    recon = reconcile_eurusd_1d_to_otc(
+        otc_asset=otc_a, eurusd_asset=eu_a, days=lookback
+    )
+
     return {
-        "ok": True,
+        "ok": int(rebuilt.get("upserted") or 0) > 0
+        or int(recon.get("upserted") or 0) > 0
+        or int(rebuilt.get("daily_built") or 0) > 0,
         "otc_asset": otc_a,
         "eurusd_asset": eu_a,
         "days": lookback,
-        "upserted": int(rebuilt.get("upserted") or 0),
+        "upserted": int(recon.get("upserted") or rebuilt.get("upserted") or 0),
         "fetched": int(rebuilt.get("daily_built") or 0),
-        "hourly": hourly_info,
+        "hourly": hourly_pull,
         "daily": rebuilt,
-        "oldest": (hourly_info or {}).get("oldest")
-        or (hourly_info or {}).get("from"),
-        "newest": (hourly_info or {}).get("newest")
-        or (hourly_info or {}).get("to"),
+        "reconcile": recon,
+        "lock_released": unlocked,
+        "tip_error": tip_error,
+        "oldest": (hourly_pull or {}).get("oldest")
+        or (hourly_pull or {}).get("from"),
+        "newest": (hourly_pull or {}).get("newest")
+        or (hourly_pull or {}).get("to"),
+        "note": (
+            "EURUSD D1 vem da agregacao do 1h Dukascopy ja salvo. "
+            "Se salvos=0, rode sql/ohlc_candles_eurusd_1d.sql e "
+            "confirme que ohlc_candles_eurusd (1h) tem dados."
+        ),
     }
