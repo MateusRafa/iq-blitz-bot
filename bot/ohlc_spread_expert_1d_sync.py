@@ -314,41 +314,69 @@ def backfill_expert_otc_1d(
     hours: int | None = None,
     otc_asset: str | None = None,
 ) -> dict[str, Any]:
-    """Puxa historico Expert 1h e agrega D1."""
+    """Puxa historico ExpertOption 1D nativo (WS) → ohlc_candles_expert_1d.
+
+    Se 1D nativo falhar, tenta 1h + agregacao como fallback.
+    """
+    from bot.expertoption_fetch import fetch_ohlc_1d_rows_for_store
+
     otc_a = normalize_asset(otc_asset or _otc_asset())
     hrs = max(24, min(int(hours or 24 * 120), 24 * 800))
     lookback_days = max(1, hrs // 24)
 
-    hourly_info: dict[str, Any] | None = None
     tip_error: str | None = None
+    native_upserted = 0
+    native_fetched = 0
     try:
-        if collector_expert.status().get("asset") != otc_a:
-            try:
-                collector_expert.set_asset(otc_a)
-            except RuntimeError:
-                pass
-        pull = collector_expert.pull_now(otc_a, hours=hrs)
-        hourly_info = pull.get("pull") if isinstance(pull, dict) else None
+        rows = fetch_ohlc_1d_rows_for_store(days=lookback_days, asset=otc_a)
+        native_fetched = len(rows)
+        if rows:
+            for r in rows:
+                r["source"] = "expertoption"
+                r["timeframe"] = TIMEFRAME
+            native_upserted = upsert_candles(rows, table=TABLE_EXPERT_1D)
     except Exception as exc:  # noqa: BLE001
-        tip_error = str(exc)[:300]
+        tip_error = str(exc)[:400]
 
-    rebuilt = rebuild_expert_1d_from_hourly(
-        otc_asset=otc_a, days=lookback_days, include_today=True
-    )
+    hourly_info: dict[str, Any] | None = None
+    rebuilt: dict[str, Any] | None = None
+    if native_fetched == 0:
+        try:
+            if collector_expert.status().get("asset") != otc_a:
+                try:
+                    collector_expert.set_asset(otc_a)
+                except RuntimeError:
+                    pass
+            pull = collector_expert.pull_now(otc_a, hours=hrs)
+            hourly_info = pull.get("pull") if isinstance(pull, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            tip_error = (
+                f"{tip_error}; fallback 1h: {exc}"
+                if tip_error
+                else f"fallback 1h: {exc}"
+            )[:400]
+        rebuilt = rebuild_expert_1d_from_hourly(
+            otc_asset=otc_a, days=lookback_days, include_today=True
+        )
+
+    upserted = native_upserted or int((rebuilt or {}).get("upserted") or 0)
+    fetched = native_fetched or int((rebuilt or {}).get("daily_built") or 0)
     return {
-        "ok": int(rebuilt.get("daily_built") or 0) > 0
-        or int(rebuilt.get("upserted") or 0) > 0,
+        "ok": fetched > 0 or upserted > 0,
         "asset": otc_a,
-        "upserted": int(rebuilt.get("upserted") or 0),
-        "fetched": int(rebuilt.get("daily_built") or 0),
+        "upserted": upserted,
+        "fetched": fetched,
+        "mode": "native_1d" if native_fetched else "hourly_agg_fallback",
+        "native_fetched": native_fetched,
+        "native_upserted": native_upserted,
         "hourly": hourly_info,
         "daily": rebuilt,
         "timeframe": TIMEFRAME,
         "table": TABLE_EXPERT_1D,
         "error": tip_error,
         "note": (
-            "OTC Expert D1 e agregado do 1h em ohlc_candles_expert. "
-            "Se fetched=0, puxe historico na ferramenta Expert 1h antes."
+            "Prioridade: candles 1D nativos via WS ExpertOption. "
+            "Se fetched=0, confira EXPERTOPTION_AUTH_TOKEN / DEMO / ASSET_ID."
         ),
     }
 
