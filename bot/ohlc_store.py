@@ -16,8 +16,9 @@ except ImportError:
 
 TABLE = "ohlc_candles"
 TABLE_1M = "ohlc_candles_1m"
-TABLE_1D = "ohlc_candles_1d"  # coletor diario (/ohlc-1d)
+TABLE_1D = "ohlc_candles_1d"  # coletor diario OTC (/ohlc-1d)
 TABLE_EURUSD = "ohlc_candles_eurusd"  # EURUSD mercado 1h (/ohlc-spread)
+TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"  # EURUSD mercado 1D (/ohlc-spread-1d)
 TABLE_OLYMP = "ohlc_candles_olymp"  # OTC Olymptrade 1h (/ohlc-spread-olymp)
 UPSERT_CHUNK = 200
 FETCH_PAGE = 1000
@@ -115,6 +116,8 @@ def upsert_candles(
             if not src:
                 if table == TABLE_EURUSD:
                     src = "dukascopy"
+                elif table == TABLE_EURUSD_1D:
+                    src = "dukascopy_agg"
                 elif table == TABLE_OLYMP:
                     src = "olymptrade"
                 else:
