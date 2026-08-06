@@ -1,4 +1,8 @@
 BinaryOptionsToolsV2>=0.2.12
 fastapi>=0.115.0
+python-multipart>=0.0.9
 uvicorn[standard]>=0.30.0
 supabase>=2.10.0
+websockets>=12.0
+aiohttp>=3.9.0
+# Olymptrade WS: pacote vendorizado em ./olymptrade_ws (PYTHONPATH=.)
