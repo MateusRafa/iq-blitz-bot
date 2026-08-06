@@ -34,6 +34,14 @@ from bot.ohlc_spread_olymp_1d_sync import (
     backfill_olymp_otc_1d,
     sync_spread_olymp_1d_sources,
 )
+from bot.ohlc_spread_expert_1d_sync import (
+    backfill_dukascopy_expert_1d,
+    backfill_expert_otc_1d,
+    sync_spread_expert_1d_sources,
+)
+from bot.ohlc_collector_expert import TABLE as TABLE_EXPERT, collector_expert
+from bot.expertoption_fetch import default_store_asset as expert_default_otc_asset
+from bot.expertoption_fetch import expertoption_available
 from bot.ohlc_spread_olymp_sync import sync_spread_olymp_sources
 from bot.ohlc_spread_sync import sync_spread_sources
 from bot.ohlc_store import (
@@ -45,10 +53,11 @@ from bot.ohlc_store import (
 )
 
 try:
-    from bot.ohlc_store import TABLE_EURUSD_1D, TABLE_OLYMP_1D
+    from bot.ohlc_store import TABLE_EURUSD_1D, TABLE_OLYMP_1D, TABLE_EXPERT_1D
 except ImportError:  # pragma: no cover
     TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"
     TABLE_OLYMP_1D = "ohlc_candles_olymp_1d"
+    TABLE_EXPERT_1D = "ohlc_candles_expert_1d"
 from bot.olymptrade_fetch import default_store_asset as olymp_default_otc_asset
 from bot.olymptrade_fetch import olymptrade_available
 from bot.runner import MIN_DURATION, normalize_asset, runner
@@ -169,6 +178,11 @@ def ohlc_spread_1d_page() -> FileResponse:
 @app.get("/ohlc-spread-olymp-1d")
 def ohlc_spread_olymp_1d_page() -> FileResponse:
     return _html_page("ohlc_spread_olymp_1d.html")
+
+
+@app.get("/ohlc-spread-expert-1d")
+def ohlc_spread_expert_1d_page() -> FileResponse:
+    return _html_page("ohlc_spread_expert_1d.html")
 
 
 @app.get("/ohlc-1m")
@@ -1794,3 +1808,304 @@ def ohlc_spread_olymp_1d_ou(
         "ou": analysis,
         "signal": signal,
     }
+
+
+# --- Spread ExpertOption OTC vs EURUSD (1D) ---
+
+
+def _spread_expert_1d_otc_asset(override: str | None = None) -> str:
+    return normalize_asset(
+        override
+        or os.environ.get("OHLC_SPREAD_EXPERT_1D_OTC_ASSET", "").strip()
+        or os.environ.get("OHLC_EXPERT_OTC_ASSET", "").strip()
+        or collector_expert.status().get("asset")
+        or expert_default_otc_asset()
+    )
+
+
+def _load_spread_expert_1d_bundle(
+    otc_asset: str | None,
+    eurusd_asset: str | None,
+    limit: int,
+) -> dict:
+    otc_a = _spread_expert_1d_otc_asset(otc_asset)
+    eu_a = normalize_asset(
+        eurusd_asset
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
+    )
+    otc_rows = fetch_candles(
+        otc_a, timeframe="1d", limit=limit, table=TABLE_EXPERT_1D
+    )
+    eu_rows = fetch_candles(
+        eu_a, timeframe="1d", limit=limit, table=TABLE_EURUSD_1D
+    )
+    eu_rows, eu_source = _prefer_eurusd_1d_rows(eu_rows)
+    try:
+        spread = build_spread_1d(otc_rows, eu_rows)
+        opens = detect_eurusd_opens(eu_rows)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Falha ao montar spread Expert 1d: {exc}") from exc
+    return {
+        "otc_asset": otc_a,
+        "eurusd_asset": eu_a,
+        "eurusd_source": eu_source,
+        "otc": otc_rows,
+        "eurusd": eu_rows,
+        "spread": spread,
+        "eurusd_opens": opens,
+    }
+
+
+@app.get("/api/ohlc-spread-expert-1d/status")
+def ohlc_spread_expert_1d_status(_: None = Depends(require_token)) -> dict:
+    otc_asset = _spread_expert_1d_otc_asset()
+    eu_a = normalize_asset(
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip()
+        or collector_eurusd.status().get("asset")
+        or "EURUSD"
+    )
+    try:
+        otc_sum = stored_summary(otc_asset, "1d", table=TABLE_EXPERT_1D)
+    except Exception as exc:  # noqa: BLE001
+        otc_sum = {
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+        }
+    try:
+        eu_sum = stored_summary(eu_a, "1d", table=TABLE_EURUSD_1D)
+    except Exception as exc:  # noqa: BLE001
+        eu_sum = {
+            "stored_count": None,
+            "stored_last": None,
+            "stored_err": str(exc)[:200],
+        }
+    otc_st = collector_expert.status()
+    return {
+        "otc": {
+            "asset": otc_asset,
+            "collector_running": collector_expert.is_running(),
+            "table": TABLE_EXPERT_1D,
+            "pair": otc_st.get("pair"),
+            "phase": otc_st.get("phase"),
+            "message": otc_st.get("message"),
+            **otc_sum,
+        },
+        "eurusd": {
+            "asset": eu_a,
+            "running": False,
+            "phase": "dukascopy_agg",
+            "message": "EURUSD D1 em ohlc_candles_eurusd_1d",
+            "table": TABLE_EURUSD_1D,
+            "source": "dukascopy_agg",
+            "supabase_ok": otc_st.get("supabase_ok"),
+            "supabase_msg": otc_st.get("supabase_msg"),
+            **eu_sum,
+        },
+        "timeframe": "1d",
+        "supabase_ok": otc_st.get("supabase_ok"),
+        "supabase_msg": otc_st.get("supabase_msg"),
+    }
+
+
+@app.post("/api/ohlc-spread-expert-1d/start")
+def ohlc_spread_expert_1d_start(
+    body: OhlcStartBody = OhlcStartBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    """Inicia coletor Expert 1h (base da agregacao D1)."""
+    asset = body.asset or _spread_expert_1d_otc_asset()
+    try:
+        collector_expert.start(asset)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ohlc_spread_expert_1d_status(_)
+
+
+@app.post("/api/ohlc-spread-expert-1d/stop")
+def ohlc_spread_expert_1d_stop(_: None = Depends(require_token)) -> dict:
+    collector_expert.stop()
+    return ohlc_spread_expert_1d_status(_)
+
+
+@app.post("/api/ohlc-spread-expert-1d/pull-now")
+def ohlc_spread_expert_1d_pull_now(
+    body: OhlcSpreadSyncBody = OhlcSpreadSyncBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        sync = sync_spread_expert_1d_sources(days=max(body.days, 30))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_expert_1d_status(_)
+    st["sync"] = sync
+    st["pull"] = {
+        "otc_upserted": (sync.get("otc") or {}).get("upserted"),
+        "eurusd_upserted": (sync.get("eurusd") or {}).get("upserted"),
+        "source_eurusd": "dukascopy_agg",
+        "source_otc": "expertoption_agg",
+    }
+    eu = sync.get("eurusd") or {}
+    otc = sync.get("otc") or {}
+    if not eu.get("ok") and not otc.get("ok"):
+        detail = eu.get("error") or otc.get("error") or "Falha sync Expert 1D"
+        raise HTTPException(status_code=502, detail=detail)
+    return st
+
+
+@app.post("/api/ohlc-spread-expert-1d/backfill-otc")
+def ohlc_spread_expert_1d_backfill_otc(
+    body: OhlcSpreadOtcHistoryBody = OhlcSpreadOtcHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    otc_a = _spread_expert_1d_otc_asset(body.asset)
+    hours = max(24, min(int(body.days) * 24, 24 * 800))
+    try:
+        pull = backfill_expert_otc_1d(hours=hours, otc_asset=otc_a)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_expert_1d_status(_)
+    st["backfill_otc"] = pull
+    return st
+
+
+@app.post("/api/ohlc-spread-expert-1d/backfill-dukascopy")
+def ohlc_spread_expert_1d_backfill_dukascopy(
+    body: OhlcSpreadDukaHistoryBody = OhlcSpreadDukaHistoryBody(),
+    _: None = Depends(require_token),
+) -> dict:
+    otc_a = _spread_expert_1d_otc_asset(body.otc_asset)
+    try:
+        pull = backfill_dukascopy_expert_1d(
+            days=body.days,
+            match_otc=body.match_otc,
+            otc_asset=otc_a,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    st = ohlc_spread_expert_1d_status(_)
+    st["backfill_dukascopy"] = pull
+    return st
+
+
+@app.get("/api/ohlc-spread-expert-1d/export")
+def ohlc_spread_expert_1d_export(
+    days: int = 120,
+    sync: int = 1,
+    _: None = Depends(require_token),
+) -> Response:
+    lookback = max(1, min(int(days), 800))
+    sync_info: dict | None = None
+    if sync:
+        try:
+            sync_info = sync_spread_expert_1d_sources(days=min(lookback, 120))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not sync_info.get("ok"):
+            otc_err = (sync_info.get("otc") or {}).get("error")
+            eu_err = (sync_info.get("eurusd") or {}).get("error")
+            detail = "; ".join(x for x in (otc_err, eu_err) if x) or "Sync falhou"
+            raise HTTPException(status_code=502, detail=detail)
+
+    otc_a = _spread_expert_1d_otc_asset()
+    eu_a = normalize_asset(
+        os.environ.get("OHLC_EURUSD_ASSET", "").strip() or "EURUSD"
+    )
+    otc_rows = fetch_candles_range(otc_a, timeframe="1d", table=TABLE_EXPERT_1D)
+    eu_rows = fetch_candles_range(eu_a, timeframe="1d", table=TABLE_EURUSD_1D)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"ohlc_1d_{otc_a}.csv", candles_to_csv(otc_rows))
+        zf.writestr(f"ohlc_1d_{eu_a}_dukascopy.csv", candles_to_csv(eu_rows))
+        if sync_info is not None:
+            import json
+
+            zf.writestr("sync.json", json.dumps(sync_info, indent=2, default=str))
+    fname = f"ohlc_spread_expert_1d_{otc_a}_{eu_a}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/ohlc-spread-expert-1d/series")
+def ohlc_spread_expert_1d_series(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    limit: int = 0,
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        payload = _load_spread_expert_1d_bundle(otc_asset, eurusd_asset, limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    weekend_n = sum(1 for p in payload["spread"] if p.get("weekend"))
+    after_hours_n = sum(1 for p in payload["spread"] if p.get("after_hours"))
+    return {
+        "timeframe": "1d",
+        "otc_source": "expertoption",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "otc_count": len(payload["otc"]),
+        "eurusd_count": len(payload["eurusd"]),
+        "spread_count": len(payload["spread"]),
+        "weekend_points": weekend_n,
+        "after_hours_points": after_hours_n,
+        "otc": payload["otc"],
+        "eurusd": payload["eurusd"],
+        "spread": payload["spread"],
+        "eurusd_opens": payload["eurusd_opens"],
+    }
+
+
+@app.get("/api/ohlc-spread-expert-1d/ou")
+def ohlc_spread_expert_1d_ou(
+    otc_asset: str | None = None,
+    eurusd_asset: str | None = None,
+    limit: int = 0,
+    paired_only: bool = True,
+    min_n: int = 48,
+    payout: float = 0.92,
+    z_min: float = 1.5,
+    edge_margin: float = 0.03,
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        payload = _load_spread_expert_1d_bundle(otc_asset, eurusd_asset, limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    analysis = analyze_spread_ou(
+        payload["spread"],
+        paired_only=paired_only,
+        min_n=max(20, min(min_n, 5000)),
+    )
+    signal = evaluate_paper_signal(
+        analysis,
+        payout=payout,
+        z_min=z_min,
+        edge_margin=edge_margin,
+    )
+    return {
+        "timeframe": "1d",
+        "otc_source": "expertoption",
+        "otc_asset": payload["otc_asset"],
+        "eurusd_asset": payload["eurusd_asset"],
+        "eurusd_source": payload["eurusd_source"],
+        "spread_count": len(payload["spread"]),
+        "ou": analysis,
+        "signal": signal,
+    }
+
