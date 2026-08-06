@@ -14,14 +14,15 @@ from bot.ohlc_collector_1d import (
     pocket_tz_offset,
 )
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
-from bot.ohlc_store import (
-    TABLE_EURUSD_1D,
-    fetch_candles_range,
-    stored_summary,
-    upsert_candles,
-)
+from bot.ohlc_store import fetch_candles_range, stored_summary, upsert_candles
 from bot.ohlc_spread import _key_day
 from bot.runner import normalize_asset
+
+# Compat: deploy parcial pode ter sync novo + ohlc_store antigo.
+try:
+    from bot.ohlc_store import TABLE_EURUSD_1D
+except ImportError:  # pragma: no cover
+    TABLE_EURUSD_1D = "ohlc_candles_eurusd_1d"
 
 SOURCE_EU_1D = "dukascopy_agg"
 
