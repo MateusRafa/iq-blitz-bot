@@ -152,6 +152,8 @@
               <button type="button" class="btn btn-apply" id="btn-pull">Sincronizar agora</button>
               <button type="button" class="btn btn-apply" id="btn-otc-history">Puxar histórico OTC</button>
               <button type="button" class="btn btn-start" id="btn-duka-history">Puxar histórico Dukascopy</button>
+              <button type="button" class="btn btn-apply" id="btn-import-eurusd" title="Importa CSV/Excel diario EURUSD (Investing.com)">Importar Excel/CSV</button>
+              <input type="file" id="file-import-eurusd" accept=".csv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
               <button type="button" class="btn btn-apply" id="btn-download">Baixar dados</button>
               <button type="button" class="btn btn-apply" id="btn-reload">Atualizar gráficos</button>
               <button type="button" class="btn btn-mode" id="btn-olymp" title="Carrega OTC Olymp 1D e sobrepõe no gráfico">Mostrar Olymp</button>
@@ -2438,6 +2440,44 @@
           setCmdErro(e.message || String(e));
         }
       });
+
+      (function wireImportEurusd() {
+        const btn = document.getElementById("btn-import-eurusd");
+        const inp = document.getElementById("file-import-eurusd");
+        if (!btn || !inp) return;
+        btn.addEventListener("click", () => inp.click());
+        inp.addEventListener("change", async () => {
+          const file = inp.files && inp.files[0];
+          inp.value = "";
+          if (!file) return;
+          try {
+            setCmdErro("");
+            document.getElementById("s-msg").textContent =
+              "Importando EURUSD D1 de " + file.name + "…";
+            const fd = new FormData();
+            fd.append("file", file, file.name);
+            const res = await fetch("/api/ohlc-spread-1d/import-eurusd", {
+              method: "POST",
+              headers: { "X-Control-Token": getToken() },
+              body: fd,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              const detail = data.detail || res.statusText || "Erro no import";
+              throw new Error(
+                typeof detail === "string" ? detail : JSON.stringify(detail)
+              );
+            }
+            document.getElementById("s-msg").textContent =
+              `Import OK: ${data.parsed ?? "?"} velas → +${data.upserted ?? "?"} upsert` +
+              (data.first ? ` · ${data.first} → ${data.last || "?"}` : "") +
+              ` · fonte ${data.source || "manual_import"}`;
+            await refresh();
+          } catch (e) {
+            setCmdErro(e.message || String(e));
+          }
+        });
+      })();
 
       document.getElementById("btn-download").addEventListener("click", async () => {
         try {
