@@ -54,3 +54,26 @@ def test_detect_eurusd_opens_one_per_day():
     assert opens[0]["opened_at"].startswith("2024-06-10T03:00:00")
     assert opens[1]["day"] == "2024-06-11"
     assert opens[1]["opened_at"].startswith("2024-06-11T03:00:00")
+
+
+def test_spread_1d_paired_and_weekend_carry():
+    # opened_at = meia-noite Pocket (UTC-3) → 03:00 UTC
+    otc = [
+        {"opened_at": "2024-06-14T03:00:00+00:00", "close": 1.0800},  # sex
+        {"opened_at": "2024-06-15T03:00:00+00:00", "close": 1.0850},  # sab
+        {"opened_at": "2024-06-17T03:00:00+00:00", "close": 1.0810},  # seg
+    ]
+    eurusd = [
+        {"opened_at": "2024-06-14T03:00:00+00:00", "close": 1.0790},
+        {"opened_at": "2024-06-17T03:00:00+00:00", "close": 1.0805},
+    ]
+    from bot.ohlc_spread import build_spread_1d
+
+    pts = build_spread_1d(otc, eurusd, pocket_offset=-10800)
+    assert len(pts) == 3
+    assert pts[0]["mode"] == "paired"
+    assert pts[0]["day"] == "2024-06-14"
+    assert pts[1]["mode"] == "carry"
+    assert pts[1]["weekend"] is True
+    assert abs(pts[1]["spread"] - (1.0850 - 1.0790)) < 1e-9
+    assert pts[2]["mode"] == "paired"
