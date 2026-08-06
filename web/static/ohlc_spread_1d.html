@@ -1488,7 +1488,7 @@
           ? "ligado"
           : "parado";
         document.getElementById("s-msg").textContent =
-          otc.message || eu.message || eu.error || otc.stored_err || "";
+          otc.message || eu.message || eu.stored_err || eu.error || otc.stored_err || "";
       }
 
       async function loadCharts() {
@@ -2232,7 +2232,7 @@
         try {
           setCmdErro("");
           document.getElementById("s-msg").textContent =
-            "Dukascopy desde o candle OTC Pocket mais antigo até agora…";
+            "Agregando EURUSD D1 a partir do Dukascopy 1h já salvo (libera lock se preso)…";
           const st = await api("/api/ohlc-spread-1d/backfill-dukascopy", "POST", {
             days: 800,
             match_otc: true,
@@ -2240,13 +2240,13 @@
           });
           renderStatus(st);
           const bf = st.backfill_dukascopy || {};
+          const daily = bf.daily || {};
           document.getElementById("s-msg").textContent =
-            `Dukascopy→D1 (casado OTC D1): ${bf.upserted ?? "?"}/${bf.fetched ?? "?"} velas` +
-            (bf.mode ? ` · ${bf.mode}` : "") +
-            (bf.chunks != null ? ` · ${bf.chunks} chunks` : "") +
-            (bf.skipped_chunks ? ` · ${bf.skipped_chunks} pulados` : "") +
-            (bf.from ? ` · ${bf.from} → ${bf.to || "?"}` : "") +
-            (bf.newest ? ` · até ${bf.newest}` : "");
+            `EURUSD D1: +${bf.upserted ?? "?"} upsert / ${bf.fetched ?? daily.daily_built ?? "?"} dias` +
+            (bf.lock_released ? " · lock liberado" : "") +
+            (bf.tip_error ? ` · aviso: ${bf.tip_error}` : "") +
+            (bf.note ? ` · ${bf.note}` : "");
+          if (!bf.ok && bf.tip_error) setCmdErro(bf.tip_error);
           await loadCharts();
         } catch (e) {
           setCmdErro(e.message || String(e));
