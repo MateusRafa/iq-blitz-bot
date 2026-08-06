@@ -251,11 +251,12 @@ class OhlcCollectorEurusd:
         match_otc: bool = False,
         otc_asset: str | None = None,
         otc_table: str | None = None,
+        otc_timeframe: str = "1h",
     ) -> dict[str, Any]:
         """Puxa Dukascopy.
 
         match_otc=True: desde o candle OTC mais antigo ate agora
-        (Pocket em ohlc_candles ou Olymp em ohlc_candles_olymp).
+        (Pocket em ohlc_candles ou Olymp em ohlc_candles_olymp; D1 em ohlc_candles_1d).
         match_otc=False: incremental desde o ultimo Dukascopy salvo.
         """
         ok, msg = supabase_ok()
@@ -278,6 +279,7 @@ class OhlcCollectorEurusd:
             or "EURUSD_otc"
         )
         otc_tbl = otc_table or TABLE
+        otc_tf = (otc_timeframe or "1h").strip() or "1h"
         ndays = max(1, min(int(days or _env_int("OHLC_SPREAD_SYNC_DAYS", 14)), 800))
         matched_otc = False
         oldest_otc: datetime | None = None
@@ -286,12 +288,12 @@ class OhlcCollectorEurusd:
 
             if match_otc:
                 try:
-                    oldest_otc = oldest_opened_at(otc_a, "1h", table=otc_tbl)
+                    oldest_otc = oldest_opened_at(otc_a, otc_tf, table=otc_tbl)
                 except Exception:  # noqa: BLE001
                     oldest_otc = None
                 if oldest_otc is None:
                     raise RuntimeError(
-                        f"Sem candles OTC em {otc_tbl} ({otc_a}). "
+                        f"Sem candles OTC em {otc_tbl} ({otc_a}, {otc_tf}). "
                         "Puxe o historico OTC antes do Dukascopy."
                     )
                 # Do mais antigo OTC (1d de folga) ate agora.
