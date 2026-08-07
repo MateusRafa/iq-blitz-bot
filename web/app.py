@@ -20,6 +20,7 @@ from bot.ohlc_collector_1d import collector_1d, TABLE_1D
 from bot.ohlc_collector_eurusd import TABLE_EURUSD, collector_eurusd
 from bot.ohlc_collector_olymp import TABLE as TABLE_OLYMP, collector_olymp
 from bot.ohlc_spread import (
+    apply_spread_price_field,
     build_spread_1d,
     build_spread_1h,
     detect_eurusd_opens,
@@ -2388,6 +2389,7 @@ def ohlc_spread_expert_1d_ou(
     payout: float = 0.92,
     z_min: float = 1.5,
     edge_margin: float = 0.03,
+    price: str = "close",
     _: None = Depends(require_token),
 ) -> dict:
     try:
@@ -2396,8 +2398,12 @@ def ohlc_spread_expert_1d_ou(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    price_field = (price or "close").strip().lower()
+    if price_field not in ("close", "open"):
+        price_field = "close"
+    spread_pts = apply_spread_price_field(payload["spread"], price_field)
     analysis = analyze_spread_ou(
-        payload["spread"],
+        spread_pts,
         paired_only=paired_only,
         min_n=max(20, min(min_n, 5000)),
     )
@@ -2413,7 +2419,8 @@ def ohlc_spread_expert_1d_ou(
         "otc_asset": payload["otc_asset"],
         "eurusd_asset": payload["eurusd_asset"],
         "eurusd_source": payload["eurusd_source"],
-        "spread_count": len(payload["spread"]),
+        "spread_price": price_field,
+        "spread_count": len(spread_pts),
         "ou": analysis,
         "signal": signal,
     }
