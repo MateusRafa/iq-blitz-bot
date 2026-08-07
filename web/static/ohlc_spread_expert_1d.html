@@ -67,12 +67,29 @@
         display: flex;
         flex-wrap: wrap;
         gap: 0.45rem;
+        align-items: center;
         margin: 0.35rem 0 0.15rem;
+      }
+      .chart-modes--spread-bar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.15rem;
+      }
+      .chart-modes-sep {
+        display: inline-block;
+        width: 1px;
+        height: 1.35rem;
+        margin: 0 0.15rem;
+        background: rgba(148, 163, 184, 0.35);
+        flex: 0 0 auto;
       }
       .chart-modes .btn-mode {
         font-size: 0.82rem;
         padding: 0.35rem 0.7rem;
         opacity: 0.72;
+        white-space: nowrap;
+        flex: 0 0 auto;
       }
       .chart-modes .btn-mode.active {
         opacity: 1;
@@ -314,11 +331,10 @@
             </div>
 
             <h2 style="margin-top:1.25rem">Spread (OTC − EURUSD)</h2>
-            <div class="chart-modes" role="group" aria-label="Preço do spread">
+            <div class="chart-modes chart-modes--spread-bar" role="group" aria-label="Controles do spread">
               <button type="button" class="btn btn-mode active" id="btn-spread-close" title="OTC close − EURUSD close">Fechamentos</button>
               <button type="button" class="btn btn-mode" id="btn-spread-open" title="OTC open − EURUSD open">Aberturas</button>
-            </div>
-            <div class="chart-modes" role="group" aria-label="Camadas do spread">
+              <span class="chart-modes-sep" aria-hidden="true"></span>
               <button type="button" class="btn btn-mode active" id="btn-after-hours">Fora do horário EURUSD</button>
               <button type="button" class="btn btn-mode active" id="btn-opens">Abertura diária EURUSD</button>
             </div>
