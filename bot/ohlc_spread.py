@@ -170,6 +170,13 @@ def build_spread_1h(
     return points
 
 
+def _row_px(row: dict[str, Any], field: str) -> float | None:
+    try:
+        return float(row[field])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 def build_spread_1d(
     otc_rows: list[dict[str, Any]],
     eurusd_rows: list[dict[str, Any]],
@@ -179,7 +186,10 @@ def build_spread_1d(
     """Spread diario: alinhado ao dia civil das velas OTC D1.
 
     Mesmo contrato de build_spread_1h (time, spread, mode paired|carry, weekend).
-    Fins de semana OTC mantem carry do ultimo close EURUSD de sessao.
+    Fins de semana OTC mantem carry do ultimo close/open EURUSD de sessao.
+
+    ``spread`` = close_otc − close_eurusd (padrao).
+    ``spread_open`` = open_otc − open_eurusd (quando ambos existem).
     """
     off = (
         int(_env_float("POCKET_TIME_OFFSET", -10800))
@@ -194,6 +204,7 @@ def build_spread_1d(
 
     points: list[dict[str, Any]] = []
     last_eu_close: float | None = None
+    last_eu_open: float | None = None
 
     otc_sorted = sorted(
         otc_rows, key=lambda r: str(r.get("opened_at") or "")
@@ -210,19 +221,21 @@ def build_spread_1d(
         key = _key_day(row.get("opened_at"), pocket_offset=off)
         if not key:
             continue
-        try:
-            otc_c = float(row["close"])
-        except (TypeError, ValueError, KeyError):
+        otc_c = _row_px(row, "close")
+        if otc_c is None:
             continue
+        otc_o = _row_px(row, "open")
 
         while eu_i < len(eu_sorted):
             eu_ts = _parse_ts(eu_sorted[eu_i].get("opened_at"))
             if eu_ts is None or eu_ts > ts:
                 break
-            try:
-                last_eu_close = float(eu_sorted[eu_i]["close"])
-            except (TypeError, ValueError, KeyError):
-                pass
+            c = _row_px(eu_sorted[eu_i], "close")
+            o = _row_px(eu_sorted[eu_i], "open")
+            if c is not None:
+                last_eu_close = c
+            if o is not None:
+                last_eu_open = o
             eu_i += 1
 
         # Dia civil Pocket do ponto OTC.
@@ -235,13 +248,16 @@ def build_spread_1d(
         paired = key in by_eu
 
         if paired:
-            try:
-                eu_c = float(by_eu[key]["close"])
-            except (TypeError, ValueError, KeyError):
+            eu_c = _row_px(by_eu[key], "close")
+            if eu_c is None:
                 eu_c = last_eu_close
+            eu_o = _row_px(by_eu[key], "open")
+            if eu_o is None:
+                eu_o = last_eu_open
             mode = "paired"
         else:
             eu_c = last_eu_close
+            eu_o = last_eu_open
             mode = "carry"
 
         if eu_c is None:
@@ -249,22 +265,50 @@ def build_spread_1d(
 
         if paired:
             last_eu_close = eu_c
+            if eu_o is not None:
+                last_eu_open = eu_o
 
         after_hours = mode == "carry"
-        points.append(
-            {
-                "time": int(ts.timestamp()),
-                "opened_at": ts.isoformat(),
-                "spread": otc_c - eu_c,
-                "otc_close": otc_c,
-                "eurusd_close": eu_c,
-                "mode": mode,
-                "after_hours": after_hours,
-                "weekend": is_weekend or after_hours,
-                "day": key,
-            }
-        )
+        point: dict[str, Any] = {
+            "time": int(ts.timestamp()),
+            "opened_at": ts.isoformat(),
+            "spread": otc_c - eu_c,
+            "otc_close": otc_c,
+            "eurusd_close": eu_c,
+            "mode": mode,
+            "after_hours": after_hours,
+            "weekend": is_weekend or after_hours,
+            "day": key,
+        }
+        if otc_o is not None:
+            point["otc_open"] = otc_o
+        if eu_o is not None:
+            point["eurusd_open"] = eu_o
+        if otc_o is not None and eu_o is not None:
+            point["spread_open"] = otc_o - eu_o
+        points.append(point)
     return points
+
+
+def apply_spread_price_field(
+    points: list[dict[str, Any]],
+    price: str = "close",
+) -> list[dict[str, Any]]:
+    """Devolve pontos com ``spread`` no campo pedido (close|open)."""
+    field = (price or "close").strip().lower()
+    if field not in ("close", "open"):
+        field = "close"
+    if field == "close":
+        return points
+    out: list[dict[str, Any]] = []
+    for p in points:
+        so = p.get("spread_open")
+        if so is None:
+            continue
+        q = dict(p)
+        q["spread"] = float(so)
+        out.append(q)
+    return out
 
 
 def pad_eurusd_tail_to_otc(
